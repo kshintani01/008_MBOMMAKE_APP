@@ -1,0 +1,8 @@
+Django==5.0.7
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.5.1
+joblib==1.4.2
+openai==1.37.1 # Azure OpenAI 互換の最新1.x系
+python-dotenv==1.0.1
+RestrictedPython==7.4

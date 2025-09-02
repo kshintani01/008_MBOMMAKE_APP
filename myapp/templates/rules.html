@@ -1,0 +1,40 @@
+{% extends 'base.html' %}
+{% block content %}
+<form method="post" enctype="multipart/form-data" class="form">
+  {% csrf_token %}
+
+  <p class="hint">
+    ①モードでは、自然言語で「製作種別」に関するルールを記述し、CSVに予測列を追加できます。<br>
+    下の入力欄にルールを書いて「コード生成」を押すと、自動で Python コードが生成されます。
+  </p>
+
+  <label>自然言語のルール（製作種別に関する条件を記載してください）</label>
+  {{ form.natural_language }}
+
+  <div class="actions">
+    <button name="action" value="generate" class="btn">コード生成</button>
+    <a href="/" class="btn-outline">トップに戻る</a>
+  </div>
+
+  {% if generated_code %}
+    <h3>生成/編集するコード</h3>
+    <p class="hint">apply_rules(df) を定義してください</p>
+    <textarea name="code_text" rows="18" style="width:100%;font-family:monospace;">{{ generated_code }}</textarea>
+  {% else %}
+    <label>生成/編集するコード</label>
+    {{ form.code_text }}
+  {% endif %}
+
+  <label>CSVファイル</label>
+  {{ form.csv_file }}
+
+  <div class="actions">
+    <button name="action" value="apply_generated" class="btn">生成コードでCSVに適用してダウンロード</button>
+    <button name="action" value="apply_custom" class="btn-outline">上のコードでCSVに適用してダウンロード</button>
+    <a href="/" class="btn-outline">トップに戻る</a>
+  </div>
+
+  {% if message %}<p class="msg">{{ message }}</p>{% endif %}
+  {% if error %}<p class="err">{{ error }}</p>{% endif %}
+</form>
+{% endblock %}

@@ -1,0 +1,24 @@
+{% extends 'base.html' %}
+{% block content %}
+<form method="post" enctype="multipart/form-data" class="form">
+  {% csrf_token %}
+  <label>CSVファイル</label>
+  {{ form.csv_file }}
+
+  <label>目的変数のカラム名</label>
+  {{ form.target_col }}
+
+  <label>説明変数（カンマ区切り）</label>
+  {{ form.feature_cols }}
+
+  <label>モデル選択</label>
+  {{ form.model_choice }}
+
+  <div class="actions">
+    <button class="btn" type="submit">推論してCSVをダウンロード</button>
+    <a href="/" class="btn-outline">トップに戻る</a>
+  </div>
+
+  {% if error %}<p class="err">{{ error }}</p>{% endif %}
+</form>
+{% endblock %}
