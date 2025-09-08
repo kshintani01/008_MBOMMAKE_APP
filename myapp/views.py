@@ -1,7 +1,7 @@
 import io
 import os
 import pandas as pd
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render
 from .forms import RulePromptForm, CSVUploadForm
 from .services import azure_aoai
@@ -119,3 +119,11 @@ def ml(request):
                 return render(request, "ml.html", {"form": form, "error": f"エラー: {e}"})
 
     return render(request, "ml.html", ctx)
+
+def aoai_check(request):
+    try:
+        txt = azure_aoai.healthcheck()
+        ok = "ok" in txt.lower()
+        return JsonResponse({"success": ok, "echo": txt}, status=200 if ok else 502)
+    except Exception as e:
+        return JsonResponse({"success": False, "error":str(e)}, status=502)

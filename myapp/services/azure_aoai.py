@@ -1,21 +1,22 @@
 import os
-
-try:
-    from openai import AzureOpenAI
-except ImportError:
-    AzureOpenAI = None
+# services/azure_aoai.py
+from django.conf import settings
+from openai import AzureOpenAI
 
 ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT") or "dummy-model"
+API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
+DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
-_client = None
-if AzureOpenAI and ENDPOINT and API_KEY:
-    _client = AzureOpenAI(
-        api_key=API_KEY,
-        api_version="2024-12-01-preview",
-        azure_endpoint=ENDPOINT,
-    )
+print(ENDPOINT, API_KEY, API_VERSION, DEPLOYMENT)
+
+_client = AzureOpenAI(
+    api_key=API_KEY,
+    azure_endpoint=ENDPOINT,
+    api_version=API_VERSION,
+)
+
+_MODEL = settings.AZURE_OPENAI_DEPLOYMENT
 
 
 def build_system_prompt():
@@ -61,3 +62,19 @@ def generate_code(natural_language: str) -> str:
             content = content[1]
         content = content.replace("python\n", "")
     return content.strip() or CODE_EXAMPLE
+
+def healthcheck() -> str:
+    prompt = "Reply with 'ok' only."
+    if hasattr(_client, "responses"):
+        r = _client.responses.create(model=_MODEL, input=prompt)
+        text = getattr(r, "output_text", None)
+        if not text:
+            # 2) 新Responses APIの生構造
+            try:
+                text = r.choices[0].message.content
+            except Exception:
+                text = ""
+        return text or ""
+    else:
+        r = _client.chat.completions.create(model=_MODEL, messages=[{"role": "user", "content": prompt}])
+        return (r.choices[0].message.content or "").strip()
