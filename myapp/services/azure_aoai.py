@@ -1,37 +1,24 @@
+# services/azure_aoai.py
 import os
 from openai import AzureOpenAI
 
 # ===== 設定（環境変数） =====
-ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
+ENDPOINT   = os.getenv("AZURE_OPENAI_ENDPOINT")
+API_KEY    = os.getenv("AZURE_OPENAI_API_KEY")
+API_VERSION= os.getenv("AZURE_OPENAI_API_VERSION")
 DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
-# 鍵はログに出さない
-# print(ENDPOINT, API_KEY, API_VERSION, DEPLOYMENT)
-
-_client = AzureOpenAI(
-    api_key=API_KEY,
-    azure_endpoint=ENDPOINT,
-    api_version=API_VERSION,
-)
+_client = AzureOpenAI(api_key=API_KEY, azure_endpoint=ENDPOINT, api_version=API_VERSION)
 
 def _model_name() -> str:
-    # settings ではなく env（DEPLOYMENT）に統一
     return DEPLOYMENT
 
+def _has_keys() -> bool:
+    return bool(ENDPOINT and API_KEY and API_VERSION and DEPLOYMENT)
 
-# ===== 参考：ダミーコード =====
-CODE_EXAMPLE = (
-    "import pandas as pd\nimport numpy as np\n\n"
-    "def apply_rules(df):\n"
-    "    prediction = pd.Series([0]*len(df), name='prediction')\n"
-    "    return prediction\n"
-)
-
-
-# ===== 共通：Responses からテキスト抽出（空返し対策） =====
-def _extract_text_from_responses(resp):
+# ===== 共通：テキスト抽出（Responses / Chat 両対応） =====
+def _extract_text_from_responses(resp) -> str:
+    # 新Responses API
     txt = getattr(resp, "output_text", None)
     if txt:
         return txt
@@ -44,8 +31,52 @@ def _extract_text_from_responses(resp):
         pass
     return ""
 
+def _extract_text_from_chat(resp) -> str:
+    try:
+        return (resp.choices[0].message.content or "").strip()
+    except Exception:
+        return ""
 
-# ===== 旧: 関数ごと生成するモード（そのまま） =====
+# ===== 互換レイヤー：responses が無ければ chat.completions を使う =====
+def _supports_responses() -> bool:
+    return hasattr(_client, "responses")
+
+def _llm_call_system_user(system_text: str, user_text: str) -> str:
+    model = _model_name()
+    if not _has_keys():
+        return ""
+
+    if _supports_responses():
+        # Responses API（新）
+        resp = _client.responses.create(
+            model=model,
+            input=[
+                {"role": "system", "content": system_text},
+                {"role": "user",   "content": user_text},
+            ],
+        )
+        return _extract_text_from_responses(resp).strip()
+    else:
+        # Chat Completions API（旧）
+        resp = _client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_text},
+                {"role": "user",   "content": user_text},
+            ],
+            temperature=0,
+        )
+        return _extract_text_from_chat(resp)
+
+# ===== 参考：ダミーコード =====
+CODE_EXAMPLE = (
+    "import pandas as pd\nimport numpy as np\n\n"
+    "def apply_rules(df):\n"
+    "    prediction = pd.Series([0]*len(df), name='prediction')\n"
+    "    return prediction\n"
+)
+
+# ===== 旧：関数ごと生成するモード =====
 def build_system_prompt():
     return (
         "You are a Python data wrangler. Given Japanese natural language rules, "
@@ -55,51 +86,34 @@ def build_system_prompt():
         "    return prediction\n"
     )
 
-
 def generate_code(natural_language: str) -> str:
-    # キー未設定ならダミー返す
-    if not (ENDPOINT and API_KEY and API_VERSION and DEPLOYMENT):
+    if not _has_keys():
         return CODE_EXAMPLE
 
-    prompt = (
+    user_prompt = (
         "以下の自然言語ルールを満たす apply_rules(df) を返す Python コードだけを出力:\n\n"
         f"[ルール]\n{natural_language}\n"
     )
-    resp = _client.responses.create(
-        model=_model_name(),
-        input=[
-            {"role": "system", "content": build_system_prompt()},
-            {"role": "user", "content": prompt},
-        ],
-    )
-    content = _extract_text_from_responses(resp).strip()
+    content = _llm_call_system_user(build_system_prompt(), user_prompt).strip()
 
-    # コードフェンスがあれば、python ブロック優先→最長ブロック
+    # コードフェンス剥がし（python ブロック優先→最長）
     if "```" in content:
         parts = [p.strip() for p in content.split("```") if p.strip()]
         prefer = [p for p in parts if p.lower().startswith("python")]
-        block = (prefer[0] if prefer else max(parts, key=len))
+        block = (prefer[0] if prefer else (max(parts, key=len) if parts else ""))
         content = block.replace("python", "", 1).strip()
 
     return content or CODE_EXAMPLE
 
-
 def healthcheck() -> str:
-    if not (ENDPOINT and API_KEY and API_VERSION and DEPLOYMENT):
-        return "ok"  # ローカル無設定時の仮OK
-    prompt = "Reply with 'ok' only."
-    r = _client.responses.create(model=_model_name(), input=prompt)
-    text = _extract_text_from_responses(r).strip()
+    if not _has_keys():
+        return "ok"
+    text = _llm_call_system_user("", "Reply with 'ok' only.").strip()
     return text or "ok"
 
-
-# ===== 新: RULES ブロックの「中身だけ」を生成するモード =====
+# ===== 新：RULES ブロックの「中身だけ」を生成するモード =====
 def generate_rules_body(natural_language: str, base_code: str) -> str:
-    """
-    自然言語ルールとベースコードから、
-    # === RULES:BEGIN === と # === RULES:END === の間に入れる「中身だけ」を返す。
-    """
-    if not (ENDPOINT and API_KEY and API_VERSION and DEPLOYMENT):
+    if not _has_keys():
         return "prediction[:] = '未分類'  # fallback(no-keys)"
 
     sys_prompt = (
@@ -149,29 +163,21 @@ def generate_rules_body(natural_language: str, base_code: str) -> str:
         "[ベースコード]\n{base_code}\n"
     )
 
-    resp = _client.responses.create(
-        model=_model_name(),
-        input=[
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
-
-    raw = _extract_text_from_responses(resp).strip()
+    raw = _llm_call_system_user(sys_prompt, user_prompt).strip()
 
     # フェンス剥がし（python ブロック優先→最長）
     body = raw
     if "```" in raw:
         parts = [p.strip() for p in raw.split("```") if p.strip()]
         prefer = [p for p in parts if p.lower().startswith("python")]
-        body = (prefer[0] if prefer else max(parts, key=len))
+        body = (prefer[0] if prefer else (max(parts, key=len) if parts else ""))
         body = body.replace("python", "", 1).strip()
 
     # 空 or pass を物理的に回避
     if not body or body.strip() in {"pass", "# 生成結果なし"}:
         body = "prediction[:] = '未分類'  # fallback"
 
-    # 最低1本の代入を保証（無ければダミー1行を追加）
+    # 最低1本の代入を保証
     if "prediction.loc[" not in body:
         if "prediction[:]" not in body:
             body = "prediction[:] = '未分類'\n" + body
