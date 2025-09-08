@@ -8,6 +8,35 @@
     下の入力欄にルールを書いて「コード生成」を押すと、自動で Python コードが生成されます。
   </p>
 
+  <!-- ▼ 追加：注意と良い例 / 悪い例 -->
+  <details class="hint" style="margin:12px 0;">
+    <summary><strong>書き方の注意（クリックで開く）</strong></summary>
+    <ul>
+      <li>NGワード: <code>True</code> / <code>False</code> / <code>if</code> / <code>for</code> / <code>while</code> / <code>import</code> などは使えません（自動生成コードで検出されるとエラー）。</li>
+      <li>OKな書き方: 真偽は <em>数値や文字列</em> で表現してください（例: 「1=真」「'true'」「'yes'」）。</li>
+      <li>分岐は <code>prediction.loc[条件] = 'ラベル'</code> の形で書かれます。複雑なロジックでも <code>&amp;</code>, <code>|</code> で合成します。</li>
+    </ul>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div class="card">
+        <div><strong>悪い例（NG）</strong></div>
+        <pre>sample が True のとき「製作A」</pre>
+      </div>
+      <div class="card">
+        <div><strong>良い例（OK）</strong></div>
+        <pre>sample が 1 または 'true' のとき「製作A」</pre>
+      </div>
+      <div class="card">
+        <div><strong>悪い例（NG）</strong></div>
+        <pre>if 数量 &gt; 10 なら …</pre>
+      </div>
+      <div class="card">
+        <div><strong>良い例（OK）</strong></div>
+        <pre>数量が10を超え、品目区分が「加工」のとき「部品製作」</pre>
+      </div>
+    </div>
+  </details>
+  <!-- ▲ 追加ここまで -->
+
   <label>自然言語のルール（製作種別に関する条件を記載してください）</label>
   {{ form.natural_language }}
 
@@ -43,6 +72,6 @@
   </div>
 
   {% if message %}<p class="msg">{{ message }}</p>{% endif %}
-  {% if error %}<p class="err">{{ error }}</p>{% endif %}
+  {% if error %}<pre class="err">{{ error }}</pre>{% endif %}
 </form>
 {% endblock %}

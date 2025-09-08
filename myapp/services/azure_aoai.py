@@ -163,6 +163,7 @@ def generate_rules_body(natural_language: str, base_code: str, df=None) -> str:
         "     prediction[:] = '未分類'\n"
         " - You MUST reference at least ONE EXISTING COLUMN from the provided schema.\n"
         " - DO NOT invent column names.\n"
+        " - Do NOT use Python reserved words such as True/False, if/for/while; prefer numeric/string checks instead.\n"
         " - FORBIDDEN: empty-set conditions such as df.index.isin([]) or .isin([]) with an empty list.\n"
         " - No imports / I/O / defs / eval/exec / with/try / lambda / globals.\n"
         " - Only use 'df' and 'prediction' (pandas/numpy already available).\n"

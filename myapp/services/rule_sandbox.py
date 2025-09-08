@@ -1,99 +1,76 @@
-import types
-import pandas as pd
-import numpy as np
-import builtins
+# rule_sandbox.py （禁止構文チェックまわりを差し替え）
 import ast
 
+FORBIDDEN_TOKENS = {
+    "keywords": ["if", "for", "while", "with", "try", "class", "def", "lambda", "global", "nonlocal"],
+    "calls":    ["eval", "exec", "__import__"],
+    "imports":  ["import", "from"],
+    "literals": ["True", "False", "None"],  # ← True/False を禁止している設計ならここで捕捉
+}
 
-ALLOWED_BUILTINS = {"range", "len", "min", "max", "sum", "abs", "all", "any", "enumerate"}
-ALLOWED_GLOBALS = {"pd": pd, "np": np}
+READABLE_HINTS = {
+    "if":      "if 文は禁止です。条件分岐は pandas のブール条件（cond）を作って prediction.loc[cond] を使ってください。",
+    "for":     "for 文は禁止です。反復は使わず、ベクトル化した条件式で書いてください。",
+    "while":   "while 文は禁止です。",
+    "with":    "with 文は禁止です。",
+    "try":     "try/except は禁止です。",
+    "class":   "class 定義は禁止です。",
+    "def":     "def 定義は禁止です。apply_rules の外で関数は作れません。",
+    "lambda":  "lambda は禁止です。",
+    "global":  "global は禁止です。",
+    "nonlocal":"nonlocal は禁止です。",
+    "eval":    "eval() は禁止です。",
+    "exec":    "exec() は禁止です。",
+    "__import__": "__import__ は禁止です。",
+    "import":  "import は禁止です。",
+    "from":    "from import は禁止です。",
+    "True":    "True は禁止です。代わりに 1 や 'true' 等で判定してください（例：pd.to_numeric(col, errors='coerce')==1）。",
+    "False":   "False は禁止です。代わりに 0 や 'false' 等で判定してください。",
+    "None":    "None は禁止です。欠損は df['col'].isna() で判定してください。",
+}
 
+def lint_forbidden(code: str):
+    tree = ast.parse(code)
+    found = []
 
-# 許可ノード（最低限）
-_ALLOWED_NODES = (
-    ast.Module, ast.FunctionDef, ast.arguments, ast.arg, ast.Load, ast.Store,
-    ast.Return, ast.Assign, ast.AugAssign, ast.Expr, ast.Call, ast.Name,
-    ast.Attribute, ast.Subscript, ast.Slice, ast.BinOp, ast.BoolOp, ast.UnaryOp,
-    ast.Compare, ast.If, ast.For, ast.While, ast.Constant, ast.List, ast.Dict,
-    ast.Tuple, ast.ListComp, ast.DictComp, ast.GeneratorExp, ast.comprehension,
-)
-
-
-class SandboxError(Exception):
-    pass
-
-class _RemoveImports(ast.NodeTransformer):
-    def __init__(self):
-        super().__init__()
-        self.removed = 0
-
-    def visit_Import(self, node):
-        self.removed += 1
-        return None
-
-    def visit_ImportFrom(self, node):
-        self.removed += 1
-        return None  
-
-def _sanitize_remove_imports(code_text: str) -> tuple[str, int]:
-    """
-    Import / from ... import ... をASTで除去して、クリーンなコードを返す。
-    戻り値: (sanitized_code, removed_count)
-    """
-    tree = ast.parse(code_text)
-    remover = _RemoveImports()
-    tree = remover.visit(tree)
-    ast.fix_missing_locations(tree)
-    try:
-        sanitized = ast.unparse(tree)  # Python 3.9+
-    except Exception:
-        # もしunparse不可なら、コンパイル＆exec直前までASTで持ち回す設計に変える。
-        # ここでは簡便に元コードを返す（実環境では3.9+想定）
-        sanitized = code_text
-    return sanitized, remover.removed
-
-def _check_ast_tree(code_text: str):
-    tree = ast.parse(code_text)
     for node in ast.walk(tree):
-        if not isinstance(node, _ALLOWED_NODES):
-            raise SandboxError(f"禁止構文を検出: {type(node).__name__}")
+        # import系
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            found.append("import" if isinstance(node, ast.Import) else "from")
+        # def/class
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            found.append("def")
+        if isinstance(node, ast.ClassDef):
+            found.append("class")
+        # 制御構文
+        if isinstance(node, (ast.If, ast.For, ast.While, ast.With, ast.Try)):
+            name = node.__class__.__name__.lower()  # if/for/while/with/try
+            found.append(name)
+        # lambda / global / nonlocal
+        if isinstance(node, ast.Lambda):
+            found.append("lambda")
+        if isinstance(node, ast.Global):
+            found.append("global")
+        if isinstance(node, ast.Nonlocal):
+            found.append("nonlocal")
+        # 危険呼び出し
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id == "__import__":
-                raise SandboxError("__import__は禁止")
-    return tree
+            if node.func.id in FORBIDDEN_TOKENS["calls"]:
+                found.append(node.func.id)
+        # True / False / None リテラル（Python 3.8+ は Constant）
+        if isinstance(node, ast.Name) and node.id in FORBIDDEN_TOKENS["literals"]:
+            found.append(node.id)
+        if isinstance(node, ast.Constant):
+            if node.value is True:  found.append("True")
+            if node.value is False: found.append("False")
+            if node.value is None:  found.append("None")
 
-def exec_user_code(code_text: str):
-    """コードを検証・実行し、apply_rules 関数を返す"""
-    # 1) Import類を除去
-    sanitized, removed = _sanitize_remove_imports(code_text)
-    if removed:
-        # ログだけ残す（UIに出さない）
-        print(f"[sandbox] removed {removed} import statement(s) from user code")
+    # 重複除去
+    found = list(dict.fromkeys(found))
 
-    # 2) 残りを厳格チェック
-    _check_ast_tree(sanitized)
-
-    # 3) 実行
-    safe_builtins = {k: getattr(builtins, k) for k in ALLOWED_BUILTINS if hasattr(builtins, k)}
-    env = {"__builtins__": safe_builtins, **ALLOWED_GLOBALS}
-
-    # 早期構文チェック（エラー行が分かりやすい）
-    compile(sanitized, "<user_code>", "exec")
-    exec(sanitized, env, env)
-
-    fn = env.get("apply_rules")
-    if not isinstance(fn, types.FunctionType):
-        raise SandboxError("apply_rules(df) 関数が見つかりません")
-    return fn
-
-
-def run_on_dataframe(code_text: str, df: pd.DataFrame) -> pd.Series:
-    fn = exec_user_code(code_text)
-    out = fn(df.copy())
-    if not isinstance(out, pd.Series):
-        raise SandboxError("apply_rules は pandas.Series を返す必要があります")
-    if len(out) != len(df):
-        raise SandboxError("返却 Series の長さが df と一致しません")
-    if out.name is None:
-        out.name = "prediction"
-    return out
+    if found:
+        hints = [READABLE_HINTS.get(tok, f"'{tok}' は禁止です。") for tok in found]
+        # ここで「何がダメだったか」を 1 行でまとめる
+        human = "禁止構文を検出しました: " + ", ".join(found) + "。"
+        advice = "／".join(hints)
+        raise ValueError(f"{human}\n{advice}")
