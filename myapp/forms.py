@@ -31,3 +31,13 @@ class CSVUploadForm(forms.Form):
     ],
     initial="auto-train",
     )
+
+class RulePromptForm(forms.Form):
+    natural_language = forms.CharField(
+        required=False, widget=forms.Textarea(attrs={"rows": 6})
+    )
+    code_text = forms.CharField(                 # ✅ 必須
+        required=False, widget=forms.Textarea(attrs={"rows": 18, "style": "font-family:monospace;width:100%;"})
+    )
+    csv_file = forms.FileField(required=False)
+    action = forms.CharField(widget=forms.HiddenInput(), required=False)

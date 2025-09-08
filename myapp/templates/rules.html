@@ -12,7 +12,7 @@
   {{ form.natural_language }}
 
   <div class="actions">
-    <button name="action" value="generate" class="btn">コード生成</button>
+    <button name="action" value="generate_block" class="btn">コード生成</button>
     <a href="/" class="btn-outline">トップに戻る</a>
   </div>
 
@@ -20,17 +20,25 @@
     <h3>生成/編集するコード</h3>
     <p class="hint">apply_rules(df) を定義してください</p>
     <textarea name="code_text" rows="18" style="width:100%;font-family:monospace;">{{ generated_code }}</textarea>
+    <input type="hidden" name="generated_code" value="{{ generated_code|escape }}">
   {% else %}
     <label>生成/編集するコード</label>
     {{ form.code_text }}
+  {% endif %}
+
+  {% if diff_text %}
+  <h3>差分プレビュー</h3>
+  <pre class="diff">{{ diff_text }}</pre>
+  <div class="actions">
+    <button type="submit" name="action" value="apply_to_editor" class="btn-outline">差分を適用して上のエディタへ反映</button>
+  </div>
   {% endif %}
 
   <label>CSVファイル</label>
   {{ form.csv_file }}
 
   <div class="actions">
-    <button name="action" value="apply_generated" class="btn">生成コードでCSVに適用してダウンロード</button>
-    <button name="action" value="apply_custom" class="btn-outline">上のコードでCSVに適用してダウンロード</button>
+    <button type="submit" name="action" value="apply_and_run" class="btn">生成コードでCSVに適用してダウンロード</button>
     <a href="/" class="btn-outline">トップに戻る</a>
   </div>
 

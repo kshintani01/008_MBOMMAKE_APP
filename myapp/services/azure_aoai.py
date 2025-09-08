@@ -28,7 +28,6 @@ def build_system_prompt():
         "    return prediction\n"
     )
 
-
 CODE_EXAMPLE = (
     "import pandas as pd\nimport numpy as np\n\n"
     "def apply_rules(df):\n"
@@ -52,8 +51,6 @@ def generate_code(natural_language: str) -> str:
             {"role": "system", "content": build_system_prompt()},
             {"role": "user", "content": prompt},
         ],
-        temperature=0.2,
-        max_output_tokens=800,
     )
     content = resp.output_text
     if "```" in content:
@@ -78,3 +75,50 @@ def healthcheck() -> str:
     else:
         r = _client.chat.completions.create(model=_MODEL, messages=[{"role": "user", "content": prompt}])
         return (r.choices[0].message.content or "").strip()
+
+def generate_rules_body(natural_language: str, base_code: str) -> str:
+    """
+    自然言語ルールとベースコードを渡すと、
+    # === RULES:BEGIN === と # === RULES:END === の間に入れる「中身だけ」を返す。
+    """
+    if not hasattr(_client, "responses"):  # フォールバック時はダミー
+        return "# TODO: ここに条件を記述\npass"
+
+    sys_prompt = (
+        "You are a Python data wrangler.\n"
+        "Edit ONLY the rules area for apply_rules(df).\n"
+        "Return ONLY the body (lines) to be placed between the markers,\n"
+        "without code fences, without BEGIN/END markers.\n"
+        "Target column is '製作種別' (use prediction Series to write labels).\n"
+        "Allowed operations: pandas boolean filtering, assignments to prediction.\n"
+        "STRICT PROHIBITONS: DO NOT use 'import' or 'from ... import',\n"
+        "Use pandas boolean indexing like: prediction.loc[cond] = 'xxx'\n"
+        "Do not modify variables other than 'prediction' and 'df'.\n"
+        "no function/class definitions, no I/O, no eval/exec, no global/nonlocal,\n"
+        "no external modules. Use existing 'df' and 'prediction' only.\n"
+    )
+
+
+    user_prompt = (
+        "ベースコードの RULES ブロックに挿入する『中身だけ』を出力してください。\n"
+        "コードフェンスやマーカーは出力しないでください。\n"
+        "[自然言語ルール]\n"
+        f"{natural_language}\n\n"
+        "[ベースコード]\n"
+        f"{base_code}\n"
+    )
+
+    resp = _client.responses.create(
+        model=DEPLOYMENT,
+        input=[
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+    body = (getattr(resp, "output_text", "") or "").strip()
+    # 万一コードフェンスが混ざってきたら剥がしておく
+    if "```" in body:
+        parts = body.split("```")
+        body = parts[1] if len(parts) > 1 else body
+        body = body.replace("python", "").strip()
+    return body or "# 生成結果なし"

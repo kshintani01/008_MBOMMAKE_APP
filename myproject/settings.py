@@ -22,6 +22,11 @@ AZURE_OPENAI_DEPLOYMENT=os.getenv("AZURE_OPENAI_DEPLOYMENT")
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+RULES_DIR = BASE_DIR / "var" / "rules"
+RULES_DIR.mkdir(parents=True, exist_ok=True)
+
+RULES_TEMPLATE_PATH = BASE_DIR / "myapp" / "services" / "rule_templates" / "base_rules.py"
+
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/

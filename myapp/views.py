@@ -7,71 +7,107 @@ from .forms import RulePromptForm, CSVUploadForm
 from .services import azure_aoai
 from .services.rule_sandbox import run_on_dataframe, SandboxError
 from .services.ml_engine import train_quick, predict_with_pipeline, save_pipeline, load_pipeline, MODELS_DIR
+from .services.rule_patcher import replace_rules_block, unified_diff
+from .services.rules_repo import save_version, load_base_code
 
 def index(request):
     return render(request, "index.html")
 
 def rules(request):
-    ctx = {"form": RulePromptForm()}
-    if request.method == "POST":
-        form = RulePromptForm(request.POST, request.FILES)
-        if form.is_valid():
-            action = form.cleaned_data.get("action")
-            natural = form.cleaned_data.get("natural_language")
-            code_text = form.cleaned_data.get("code_text")
-            # ★ 目的変数を固定
-            target_col = "製作種別"
-            csv_file = form.cleaned_data.get("csv_file")
+    if request.method == "GET":
+        base_code = load_base_code(prefer_tag="approved")
+        form = RulePromptForm(initial={"code_text": base_code})
+        return render(request, "rules.html", {"form": form})
 
-            if action == "generate":
-                gen = azure_aoai.generate_code(natural or "")
-                ctx.update({
-                    "form": form,
-                    "generated_code": gen,
-                    "message": "コードを生成しました（目的変数は固定：製作種別）"
-                })
-                return render(request, "rules.html", ctx)
+    # POST
+    form = RulePromptForm(request.POST, request.FILES)
+    action = request.POST.get("action")
+    ctx = {"form": form}
 
-            if action in {"apply_generated", "apply_custom"}:
-                code = azure_aoai.generate_code(natural or "") if action == "apply_generated" else (code_text or "")
-                if not csv_file:
-                    ctx.update({
-                        "form": form,
-                        "generated_code": code,
-                        "error": "CSV を選択してください"
-                    })
-                    return render(request, "rules.html", ctx)
+    if not form.is_valid():
+        ctx["error"] = "入力を確認してください"
+        return render(request, "rules.html", ctx)
+    
+    natural = form.cleaned_data.get("natural_language") or ""
+    code_text = form.cleaned_data.get("code_text") or ""
+    target_col = "製作種別"
+    csv_file = form.cleaned_data.get("csv_file")
 
-                try:
-                    df = pd.read_csv(csv_file)
-                    pred = run_on_dataframe(code, df)
+    # 1) 差分生成
+    if action == "generate_block":
+        try:
+            rules_body = azure_aoai.generate_rules_body(natural, code_text)
+            new_code = replace_rules_block(code_text, rules_body)
+            diff_text = unified_diff(code_text, new_code, "base.py", "new.py")
+            ctx.update({
+                "form": form,
+                "generated_code": new_code,   # 参考表示（使わなくても良い）
+                "diff_text": diff_text,
+                "message": "差分を生成しました。確認してください。"
+            })
+        except Exception as e:
+            ctx.update({
+                "form": form,
+                "generated_code": code_text,
+                "error": f"差分生成に失敗しました: {e}",
+            })
+        return render(request, "rules.html", ctx)
 
-                    # 既存列があれば「predicted_製作種別」を追加、なければ「製作種別」を新規作成
-                    if target_col in df.columns:
-                        df[f"predicted_{target_col}"] = pred
-                    else:
-                        df[target_col] = pred
+    # 2) 差分をエディタへ反映
+    if action == "apply_to_editor":
+        # 直前の生成結果（new_code）を hidden で受け取る構成ならそれを採用
+        # ここでは簡略化して、もう一度生成
+        try:
+            rules_body = azure_aoai.generate_rules_body(natural, code_text)
+            new_code = replace_rules_block(code_text, rules_body)
 
-                    # ダウンロード返却
-                    buf = io.StringIO()
-                    df.to_csv(buf, index=False)
-                    resp = HttpResponse(buf.getvalue(), content_type="text/csv")
-                    resp["Content-Disposition"] = "attachment; filename=rules_result.csv"
-                    return resp
+            form = RulePromptForm(initial={
+                "natural_language": natural,
+                "code_text": new_code,
+            })
+            ctx = {
+                "form": form,
+                "generated_code": new_code,
+                "message": "差分をエディタに反映しました。"
+            }
+        except Exception as e:
+            ctx.update({"form": form, "error": f"反映に失敗: {e}"})
+        return render(request, "rules.html", ctx)
 
-                except SandboxError as e:
-                    ctx.update({
-                        "form": form,
-                        "generated_code": code,
-                        "error": f"サンドボックス実行失敗: {e}"
-                    })
-                except Exception as e:
-                    ctx.update({
-                        "form": form,
-                        "generated_code": code,
-                        "error": f"CSV処理に失敗: {e}"
-                    })
-                return render(request, "rules.html", ctx)
+    # 3) 差分を適用して実行→CSVダウンロード（＆保存）
+    if action == "apply_and_run":
+        if not csv_file:
+            ctx.update({"form": form, "error": "CSV を選択してください"})
+            return render(request, "rules.html", ctx)
+        try:
+            # 差分適用コードを得る
+            rules_body = azure_aoai.generate_rules_body(natural, code_text)
+            new_code = replace_rules_block(code_text, rules_body)
+
+            # 実行
+            df = pd.read_csv(csv_file)
+            pred = run_on_dataframe(new_code, df)
+
+            if target_col in df.columns:
+                df[f"predicted_{target_col}"] = pred
+            else:
+                df[target_col] = pred
+
+            # バージョン保存（承認前は "draft" タグ）
+            save_version(new_code, tag="draft")
+
+            # ダウンロード返却
+            buf = io.StringIO()
+            df.to_csv(buf, index=False)
+            resp = HttpResponse(buf.getvalue(), content_type="text/csv")
+            resp["Content-Disposition"] = "attachment; filename=rules_result.csv"
+            return resp
+
+        except SandboxError as e:
+            ctx.update({"form": form, "error": f"サンドボックス実行失敗: {e}"})
+        except Exception as e:
+            ctx.update({"form": form, "error": f"処理に失敗: {e}"})
+        return render(request, "rules.html", ctx)
 
     return render(request, "rules.html", ctx)
 
