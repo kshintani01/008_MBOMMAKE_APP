@@ -1,12 +1,14 @@
 import os
-# services/azure_aoai.py
-from django.conf import settings
 from openai import AzureOpenAI
 
+# ===== 設定（環境変数） =====
 ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
 DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+
+# 鍵はログに出さない
+# print(ENDPOINT, API_KEY, API_VERSION, DEPLOYMENT)
 
 _client = AzureOpenAI(
     api_key=API_KEY,
@@ -14,11 +16,36 @@ _client = AzureOpenAI(
     api_version=API_VERSION,
 )
 
-_MODEL = settings.AZURE_OPENAI_DEPLOYMENT
-
 def _model_name() -> str:
+    # settings ではなく env（DEPLOYMENT）に統一
     return DEPLOYMENT
 
+
+# ===== 参考：ダミーコード =====
+CODE_EXAMPLE = (
+    "import pandas as pd\nimport numpy as np\n\n"
+    "def apply_rules(df):\n"
+    "    prediction = pd.Series([0]*len(df), name='prediction')\n"
+    "    return prediction\n"
+)
+
+
+# ===== 共通：Responses からテキスト抽出（空返し対策） =====
+def _extract_text_from_responses(resp):
+    txt = getattr(resp, "output_text", None)
+    if txt:
+        return txt
+    try:
+        for out in getattr(resp, "output", []) or []:
+            for c in getattr(out, "content", []) or []:
+                if getattr(c, "type", "") in {"output_text", "text"} and getattr(c, "text", ""):
+                    return c.text
+    except Exception:
+        pass
+    return ""
+
+
+# ===== 旧: 関数ごと生成するモード（そのまま） =====
 def build_system_prompt():
     return (
         "You are a Python data wrangler. Given Japanese natural language rules, "
@@ -28,17 +55,10 @@ def build_system_prompt():
         "    return prediction\n"
     )
 
-CODE_EXAMPLE = (
-    "import pandas as pd\nimport numpy as np\n\n"
-    "def apply_rules(df):\n"
-    "    prediction = pd.Series([0]*len(df), name='prediction')\n"
-    "    return prediction\n"
-)
-
 
 def generate_code(natural_language: str) -> str:
-    """キー未設定ならダミーコードを返す"""
-    if not _client:
+    # キー未設定ならダミー返す
+    if not (ENDPOINT and API_KEY and API_VERSION and DEPLOYMENT):
         return CODE_EXAMPLE
 
     prompt = (
@@ -46,43 +66,41 @@ def generate_code(natural_language: str) -> str:
         f"[ルール]\n{natural_language}\n"
     )
     resp = _client.responses.create(
-        model=DEPLOYMENT,
+        model=_model_name(),
         input=[
             {"role": "system", "content": build_system_prompt()},
             {"role": "user", "content": prompt},
         ],
     )
-    content = resp.output_text
+    content = _extract_text_from_responses(resp).strip()
+
+    # コードフェンスがあれば、python ブロック優先→最長ブロック
     if "```" in content:
-        content = content.split("```", 2)
-        if len(content) == 3:
-            content = content[1]
-        content = content.replace("python\n", "")
-    return content.strip() or CODE_EXAMPLE
+        parts = [p.strip() for p in content.split("```") if p.strip()]
+        prefer = [p for p in parts if p.lower().startswith("python")]
+        block = (prefer[0] if prefer else max(parts, key=len))
+        content = block.replace("python", "", 1).strip()
+
+    return content or CODE_EXAMPLE
+
 
 def healthcheck() -> str:
+    if not (ENDPOINT and API_KEY and API_VERSION and DEPLOYMENT):
+        return "ok"  # ローカル無設定時の仮OK
     prompt = "Reply with 'ok' only."
-    if hasattr(_client, "responses"):
-        r = _client.responses.create(model=_MODEL, input=prompt)
-        text = getattr(r, "output_text", None)
-        if not text:
-            # 2) 新Responses APIの生構造
-            try:
-                text = r.choices[0].message.content
-            except Exception:
-                text = ""
-        return text or ""
-    else:
-        r = _client.chat.completions.create(model=_MODEL, messages=[{"role": "user", "content": prompt}])
-        return (r.choices[0].message.content or "").strip()
+    r = _client.responses.create(model=_model_name(), input=prompt)
+    text = _extract_text_from_responses(r).strip()
+    return text or "ok"
 
+
+# ===== 新: RULES ブロックの「中身だけ」を生成するモード =====
 def generate_rules_body(natural_language: str, base_code: str) -> str:
     """
-    自然言語ルールとベースコードを渡すと、
+    自然言語ルールとベースコードから、
     # === RULES:BEGIN === と # === RULES:END === の間に入れる「中身だけ」を返す。
     """
-    if not hasattr(_client, "responses"):  # フォールバック時はダミー
-        return "# TODO: ここに条件を記述\npass"
+    if not (ENDPOINT and API_KEY and API_VERSION and DEPLOYMENT):
+        return "prediction[:] = '未分類'  # fallback(no-keys)"
 
     sys_prompt = (
         "You are a Python data-wrangling assistant.\n"
@@ -95,15 +113,14 @@ def generate_rules_body(natural_language: str, base_code: str) -> str:
         " - If rules are ambiguous, FIRST set a default for all rows:\n"
         "     prediction[:] = '未分類'\n"
         " - Do not use imports, I/O, function/class defs, eval/exec, with/try, lambda, globals.\n"
-        " - You may only use variables 'df' and 'prediction', and pandas/numpy operations already available.\n"
+        " - You may only use 'df' and 'prediction', and pandas/numpy ops already available.\n"
         " - Do NOT modify df's schema; write labels ONLY into 'prediction'.\n"
-        " - The output must contain executable Python statements only (no fences, no comments-only output).\n"
+        " - Output executable Python statements only (no fences, no comments-only output).\n"
         "Interface assumptions:\n"
         " - 'prediction' is a pandas.Series aligned to df.index and will be returned by apply_rules.\n"
-        " - Target semantic column is 日本語の製作種別 labels (strings), but you only assign to prediction.\n"
         "Quality bar:\n"
-        " - Prefer concise boolean expressions with clear precedence parentheses.\n"
-        " - When comparing strings, normalize with .str.strip() if needed.\n"
+        " - Prefer concise boolean expressions with clear parentheses.\n"
+        " - Normalize strings with .str.strip() when comparing.\n"
     )
 
     few_shot = (
@@ -111,7 +128,7 @@ def generate_rules_body(natural_language: str, base_code: str) -> str:
         "自然言語: 「数量が10超かつ品目区分が'加工'なら '部品製作'、それ以外は'未分類'」\n"
         "出力ボディ:\n"
         "prediction[:] = '未分類'\n"
-        "cond = (df['数量'] > 10) & (df['品目区分'].astype(str).str.strip() == '加工')\n"
+        "cond = (pd.to_numeric(df['数量'], errors='coerce') > 10) & (df['品目区分'].astype(str).str.strip() == '加工')\n"
         "prediction.loc[cond] = '部品製作'\n"
         "\n"
         "【良い例2】\n"
@@ -133,37 +150,31 @@ def generate_rules_body(natural_language: str, base_code: str) -> str:
     )
 
     resp = _client.responses.create(
-        model=DEPLOYMENT,
+        model=_model_name(),
         input=[
             {"role": "system", "content": sys_prompt},
             {"role": "user", "content": user_prompt},
         ],
     )
-    body = (getattr(resp, "output_text", "") or "").strip()
-    # 万一コードフェンスが混ざってきたら剥がしておく
-    if "```" in body:
-        parts = [p.strip() for p in body.split("```") if p.strip()]
-        body = parts[-1] if parts else ""
 
-    # 最低限の安全補完（空 or pass 回避）
+    raw = _extract_text_from_responses(resp).strip()
+
+    # フェンス剥がし（python ブロック優先→最長）
+    body = raw
+    if "```" in raw:
+        parts = [p.strip() for p in raw.split("```") if p.strip()]
+        prefer = [p for p in parts if p.lower().startswith("python")]
+        body = (prefer[0] if prefer else max(parts, key=len))
+        body = body.replace("python", "", 1).strip()
+
+    # 空 or pass を物理的に回避
     if not body or body.strip() in {"pass", "# 生成結果なし"}:
-        body = "prediction[:] = '未分類'  # fallback\n"
+        body = "prediction[:] = '未分類'  # fallback"
 
-    return body or "# 生成結果なし"
+    # 最低1本の代入を保証（無ければダミー1行を追加）
+    if "prediction.loc[" not in body:
+        if "prediction[:]" not in body:
+            body = "prediction[:] = '未分類'\n" + body
+        body += "\n# ensure at least one assignment\nprediction.loc[pd.Series(False, index=df.index)] = '未分類'"
 
-def _extract_text_from_responses(resp):
-    # 1) まず output_text
-    txt = getattr(resp, "output_text", None)
-    if txt:
-        return txt
-    # 2) messages 構造を総なめ（Azure Responses の素の形式対策）
-    try:
-        for out in resp.output:
-            for c in getattr(out, "content", []):
-                if getattr(c, "type", "") == "output_text" and getattr(c, "text", ""):
-                    return c.text
-                if getattr(c, "type", "") == "text" and getattr(c, "text", ""):
-                    return c.text
-    except Exception:
-        pass
-    return ""
+    return body
