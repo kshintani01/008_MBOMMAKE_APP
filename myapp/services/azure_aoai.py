@@ -64,7 +64,6 @@ def _llm_call_system_user(system_text: str, user_text: str) -> str:
                 {"role": "system", "content": system_text},
                 {"role": "user",   "content": user_text},
             ],
-            temperature=0,
         )
         return _extract_text_from_chat(resp)
 
