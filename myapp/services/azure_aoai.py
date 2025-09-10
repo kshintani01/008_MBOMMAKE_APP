@@ -1,12 +1,18 @@
 import os
 import re
 from openai import AzureOpenAI
+import pandas as pd
+from azure.storage.blob import BlobServiceClient
 
 # ===== 設定（環境変数） =====
 ENDPOINT    = os.getenv("AZURE_OPENAI_ENDPOINT")
 API_KEY     = os.getenv("AZURE_OPENAI_API_KEY")
 API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
 DEPLOYMENT  = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+
+BLOB_CONN_STR   = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+BLOB_CONTAINER  = os.getenv("AZURE_STORAGE_CONTAINER")
+BLOB_BLOB_NAME  = os.getenv("AZURE_STORAGE_DEFAULT_CSV")
 
 _client = AzureOpenAI(api_key=API_KEY, azure_endpoint=ENDPOINT, api_version=API_VERSION)
 
@@ -141,6 +147,15 @@ def healthcheck() -> str:
     text = _llm_call_system_user("", "Reply with 'ok' only.").strip()
     return text or "ok"
 
+def _load_default_df_from_blob() -> pd.DataFrame:
+    """Blob Storage からデフォルト CSV を読み込む"""
+    if not (BLOB_CONN_STR and BLOB_CONTAINER and BLOB_BLOB_NAME):
+        raise RuntimeError("Blob Storage の設定が不足しています")
+    service = BlobServiceClient.from_connection_string(BLOB_CONN_STR)
+    blob_client = service.get_blob_client(container=BLOB_CONTAINER, blob=BLOB_BLOB_NAME)
+    stream = blob_client.download_blob()
+    return pd.read_csv(stream)  # 文字コード・区切りは適宜調整
+
 # ===== 新：RULES ブロックの「中身だけ」を生成するモード =====
 def generate_rules_body(natural_language: str, base_code: str, df=None) -> str:
     """
@@ -148,6 +163,12 @@ def generate_rules_body(natural_language: str, base_code: str, df=None) -> str:
     # === RULES:BEGIN === と # === RULES:END === の間に入れる「中身だけ」を返す。
     df: DataFrame（あれば列スキーマをプロンプトに埋め込む）
     """
+    if df is None:
+        try:
+            df = _load_default_df_from_blob()
+        except Exception as e:
+            print(f"[WARN] failed to load default CSV from Blob: {e}")
+
     if not _has_keys():
         return "prediction[:] = '未分類'  # fallback(no-keys)"
 
