@@ -3,6 +3,7 @@ import re
 from openai import AzureOpenAI
 import pandas as pd
 from azure.storage.blob import BlobServiceClient
+from .rules_store import save_rules_body, load_rules_body
 
 # ===== 設定（環境変数） =====
 ENDPOINT    = os.getenv("AZURE_OPENAI_ENDPOINT")
@@ -16,11 +17,27 @@ BLOB_BLOB_NAME  = os.getenv("AZURE_STORAGE_DEFAULT_CSV")
 
 _client = AzureOpenAI(api_key=API_KEY, azure_endpoint=ENDPOINT, api_version=API_VERSION)
 
-def _model_name() -> str:
-    return DEPLOYMENT
+BEGIN_MASK = r"# === RULES:BEGIN ==="
+END_MASK = r"# === RULES:END ==="
 
 def _has_keys() -> bool:
     return bool(ENDPOINT and API_KEY and API_VERSION and DEPLOYMENT)
+
+def choose_rules_body(cand_from_llm: str | None, fallback_default: str = "prediction[:] = '未分類'") -> str:
+    """
+    優先度: Blob active > LLM生成候補 > デフォルト
+    """
+    try:
+        active = load_rules_body()  # rules/active/body.py
+    except Exception as e:
+        print(f"[WARN] failed to load active rules from Blob: {e}")
+        active = None
+
+    if active and active.strip():
+        return active
+    if cand_from_llm and cand_from_llm.strip():
+        return cand_from_llm
+    return fallback_default
 
 # ===== 便利関数 =====
 def _looks_empty_condition(body: str) -> bool:
@@ -62,55 +79,33 @@ def _strip_code_block(text: str) -> str:
     block = prefer[0] if prefer else max(parts, key=len)
     return block.replace("python", "", 1).strip()
 
-# ===== 共通：テキスト抽出（Responses / Chat 両対応） =====
-def _extract_text_from_responses(resp) -> str:
-    # 新Responses API
-    txt = getattr(resp, "output_text", None)
-    if txt:
-        return txt
-    try:
-        for out in getattr(resp, "output", []) or []:
-            for c in getattr(out, "content", []) or []:
-                if getattr(c, "type", "") in {"output_text", "text"} and getattr(c, "text", ""):
-                    return c.text
-    except Exception:
-        pass
-    return ""
-
-def _extract_text_from_chat(resp) -> str:
-    try:
-        return (resp.choices[0].message.content or "").strip()
-    except Exception:
-        return ""
-
-# ===== 互換レイヤー：responses が無ければ chat.completions を使う =====
-def _supports_responses() -> bool:
-    return hasattr(_client, "responses")
+# # ===== 共通：テキスト抽出（Responses / Chat 両対応） =====
+# def _extract_text_from_responses(resp) -> str:
+#     # 新Responses API
+#     txt = getattr(resp, "output_text", None)
+#     if txt:
+#         return txt
+#     try:
+#         for out in getattr(resp, "output", []) or []:
+#             for c in getattr(out, "content", []) or []:
+#                 if getattr(c, "type", "") in {"output_text", "text"} and getattr(c, "text", ""):
+#                     return c.text
+#     except Exception:
+#         pass
+#     return ""
 
 def _llm_call_system_user(system_text: str, user_text: str) -> str:
-    model = _model_name()
     if not _has_keys():
         return ""
-    if _supports_responses():
-        # Responses API（新）
-        resp = _client.responses.create(
-            model=model,
-            input=[
-                {"role": "system", "content": system_text},
-                {"role": "user",   "content": user_text},
-            ],
-        )
-        return _extract_text_from_responses(resp).strip()
-    else:
-        # Chat Completions API（旧）
-        resp = _client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_text},
-                {"role": "user",   "content": user_text},
-            ],
-        )
-        return _extract_text_from_chat(resp)
+
+    resp = _client.chat.completions.create(
+        model=DEPLOYMENT,
+        messages=[
+            {"role": "system", "content": system_text},
+            {"role": "user",   "content": user_text},
+        ],
+    )
+    return (resp.choices[0].message.content or "").strip()
 
 # ===== 参考：ダミーコード =====
 CODE_EXAMPLE = (
@@ -156,6 +151,16 @@ def _load_default_df_from_blob() -> pd.DataFrame:
     stream = blob_client.download_blob()
     return pd.read_csv(stream)  # 文字コード・区切りは適宜調整
 
+def _merge_rules_body(existing: str, addition: str) -> str:
+    existing = (existing or "").rstrip()
+    addition = (addition or "").rstrip()
+
+    if not addition:
+        return existing or "prediction[:] = '未分類'"
+    if not existing:
+        return addition
+    return existing + "\n\n" + addition
+
 # ===== 新：RULES ブロックの「中身だけ」を生成するモード =====
 def generate_rules_body(natural_language: str, base_code: str, df=None) -> str:
     """
@@ -168,67 +173,62 @@ def generate_rules_body(natural_language: str, base_code: str, df=None) -> str:
             df = _load_default_df_from_blob()
         except Exception as e:
             print(f"[WARN] failed to load default CSV from Blob: {e}")
+    
+    try:
+        existing_body = load_rules_body() or ""
+    except Exception as e:
+        print(f"blob: {e}")
+        existing_body = ""
 
     if not _has_keys():
-        return "prediction[:] = '未分類'  # fallback(no-keys)"
+        merged = _merge_rules_body(existing_body, "prediction.loc[pd.Series(False, index=df.index)] = '未分類'")
+        try:
+            save_rules_body(merged)
+        except Exception:
+            pass
+        return merged
 
     # --- system ---
     sys_prompt = (
         "You are a Python data-wrangling assistant.\n"
-        "Task: Output ONLY the body lines to insert between '# === RULES:BEGIN ===' and '# === RULES:END ==='.\n"
+        "Task: Output ONLY the ADDITIONAL body lines to append between the markers.\n"
+        "You MUST preserve all existing rules. Do not rewrite, reorder, or delete any existing lines.\n"
         "Hard requirements:\n"
         " - NEVER output 'pass'.\n"
-        " - ALWAYS write at least one assignment to prediction using pandas boolean indexing, e.g.:\n"
-        "     prediction.loc[cond] = 'ラベル'\n"
-        " - MUST reference at least ONE EXISTING COLUMN from the provided schema using explicit names (df['列名']).\n"
-        " - DO NOT invent column names.\n"
-        " - DO NOT use positional/index-based access to columns/rows (NO df.columns[0], df.iloc, df.iat, df[0]).\n"
-        " - DO NOT invent labels; assign ONLY labels explicitly mentioned in the user's rule.\n"
-        " - FORBIDDEN: empty-set conditions such as df.index.isin([]) or .isin([]) with an empty list.\n"
+        " - Output only NEW statements to add; DO NOT repeat existing lines.\n"
+        " - Use pandas boolean indexing like: prediction.loc[cond,] = 'ラベル'\n"
+        " - To avoid overwriting existing labels, guard with prediction.isna() when appropriate, e.g.:\n"
+        "     cond = (...)\n"
+        "     prediction.loc[cond & prediction.isna()] = 'ラベル'\n"
+        " - MUST reference at least one EXISTING COLUMN from the provided schema (df['列名']).\n"
+        " - Do NOT invent column names or labels.\n"
+        " - FORBIDDEN: empty-set conditions (df.index.isin([]), .isin([]) with [])\n"
         " - No imports / I/O / defs / eval/exec / with/try / lambda / globals.\n"
-        " - Only use 'df' and 'prediction' (pandas/numpy already available).\n"
-        " - Do NOT modify df's schema; assign labels ONLY into 'prediction'.\n"
-        " - Do NOT set a default value for all rows; the host code will handle defaults outside the markers.\n"
-        "Output executable Python statements only (no fences).\n"
-        "Hints:\n"
-        " - Normalize strings with .astype(str).str.strip() before equality checks.\n"
-        " - For Japanese boolean-ish words (e.g., 'あり'), compare as strings: df['col'].astype(str).str.strip().eq('あり') or .isin([...]).\n"
-        " - Combine conditions with & and |; add parentheses for clarity.\n"
+        " - Use only 'df' and 'prediction'. Do not modify df's schema.\n"
+        "Output executable Python statements ONLY (no fences, no comments unless necessary).\n"
     )
 
     # --- few-shot ---
     few_shot = (
-        "【良い例1（文字×数値）】\n"
-        "prediction[:] = '未分類'\n"
-        "cond = (pd.to_numeric(df['数量'], errors='coerce') > 10) & (df['品目区分'].astype(str).str.strip() == '加工')\n"
-        "prediction.loc[cond] = '部品製作'\n"
-        "\n"
-        "【良い例2（ANDで数値×数値×文字）】\n"
-        "cond = (\n"
-        "    df['材質'].astype(str).str.strip() == '鋼'\n"
-        ") & (pd.to_numeric(df['長さ'], errors='coerce') >= 1000) & (pd.to_numeric(df['数量'], errors='coerce') >= 2)\n"
-        "prediction.loc[cond] = '外注製作'\n"
-        "\n"
-        "【良い例3（ブール列）】\n"
-        "cond = (\n"
-        "    (df['sample'] == True) |\n"
-        "    (pd.to_numeric(df['sample'], errors='coerce') == 1) |\n"
-        "    (df['sample'].astype(str).str.lower().str.strip().isin(['true','t','1','yes','y']))\n"
-        ")\n"
-        "prediction.loc[cond] = '製作A'\n"
+        "【追加の良い例】\n"
+        "# 既存には触れず、新しい条件だけを追加。未確定行にだけ付与して上書き防止。\n"
+        "cond = (df['引渡'].astype(str).str.strip() == 'G112')\n"
+        "prediction.loc[cond & prediction.isna()] = 'WT137'\n"
     )
 
     schema_text = _format_schema_for_prompt(df)
 
     # --- user ---
     user_prompt = (
-        "ベースコードの RULES ブロックに挿入する『中身だけ』を、Python実行文のみで出力してください。\n"
-        "必ず少なくとも1つは prediction.loc[...] = 'ラベル' の代入を行い、pass は絶対に出力しないでください。\n"
-        "曖昧な場合は最初に prediction[:] = '未分類' としてください。\n\n"
+        "次の既存RULES本文を一切変更せず、新しい自然言語ルールを満たす『追加行のみ』を出力してください。\n"
+        "既存本文:\n"
+        f"-----EXISTING START-----\n{existing_body}\n-----EXISTING END-----\n\n"
+        "注意:\n"
+        " - 既存行の再出力・変更・削除は厳禁です。\n"
+        " - 追加行は prediction.isna() で既存付与を上書きしないように配慮してください。\n\n"
         f"{schema_text}\n\n"
         f"{few_shot}\n"
-        "[自然言語ルール]\n{natural_language}\n\n"
-        "[ベースコード]\n{base_code}\n"
+        f"[自然言語ルール]\n{natural_language}\n"
     )
 
     # --- 初回生成 ---
@@ -239,9 +239,10 @@ def generate_rules_body(natural_language: str, base_code: str, df=None) -> str:
     need_retry = (not _references_any_df_column(body)) or _looks_empty_condition(body)
     if need_retry:
         reinforce = (
-            "前回の出力では既存列の参照が無い、または空集合条件が含まれていました。"
-            "必ずスキーマ内の既存列を少なくとも1つ参照し、空集合条件（df.index.isin([]) 等）は使用しないでください。"
+            "前回の出力は不適切でした。既存本文を変更せず、追加行だけを出力してください。"
+            "必ずスキーマ内の列を参照し、空集合条件は使用しないでください。"
         )
+
         raw2 = _llm_call_system_user(sys_prompt, reinforce + "\n\n" + user_prompt).strip()
         body2 = _strip_code_block(raw2)
         if body2 and not _looks_empty_condition(body2) and _references_any_df_column(body2):
@@ -257,4 +258,12 @@ def generate_rules_body(natural_language: str, base_code: str, df=None) -> str:
             body = "prediction[:] = '未分類'\n" + body
         body += "\n# ensure at least one assignment\nprediction.loc[pd.Series(False, index=df.index)] = '未分類'"
 
-    return body
+    merged = _merge_rules_body(existing_body, body)
+
+    # ✅ AST/禁止項目の検査を通った“後”に保存
+    try:
+        save_rules_body(merged)
+    except Exception as e:
+        print(f"[WARN] failed to persist rules body: {e}")
+
+    return merged

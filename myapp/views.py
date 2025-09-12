@@ -36,7 +36,8 @@ def rules(request):
     # 1) 差分生成
     if action == "generate_block":
         try:
-            rules_body = azure_aoai.generate_rules_body(natural, code_text)
+            rules_body_llm = azure_aoai.generate_rules_body(natural, code_text)
+            rules_body = azure_aoai.choose_rules_body(rules_body_llm)
             new_code = replace_rules_block(code_text, rules_body)
             diff_text = unified_diff(code_text, new_code, "base.py", "new.py")
             ctx.update({
@@ -58,7 +59,8 @@ def rules(request):
         # 直前の生成結果（new_code）を hidden で受け取る構成ならそれを採用
         # ここでは簡略化して、もう一度生成
         try:
-            rules_body = azure_aoai.generate_rules_body(natural, code_text)
+            rules_body_llm = azure_aoai.generate_rules_body(natural, code_text)
+            rules_body = azure_aoai.choose_rules_body(rules_body_llm)
             new_code = replace_rules_block(code_text, rules_body)
 
             form = RulePromptForm(initial={
@@ -81,7 +83,8 @@ def rules(request):
             return render(request, "rules.html", ctx)
         try:
             # 差分適用コードを得る
-            rules_body = azure_aoai.generate_rules_body(natural, code_text)
+            rules_body_llm = azure_aoai.generate_rules_body(natural, code_text)
+            rules_body = azure_aoai.choose_rules_body(rules_body_llm)
             new_code = replace_rules_block(code_text, rules_body)
 
             # 実行

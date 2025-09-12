@@ -119,6 +119,8 @@ def _wrap_if_body_only(code: str) -> str:
     """
     if "def apply_rules" in code:
         return code
+    
+    wrapped_body = "".join("    " + line for line in code.splitlines(True))
 
     # RULES ボディだけを function に包む
     return (
@@ -127,8 +129,7 @@ def _wrap_if_body_only(code: str) -> str:
         "def apply_rules(df):\n"
         "    prediction = pd.Series(index=df.index, dtype=object, name='prediction')\n"
         "    # === RULES:BEGIN ===\n"
-        + "".join("    " + line for line in code.splitlines(True))
-        + "\n"
+        f"{wrapped_body}\n"
         "    # === RULES:END ===\n"
         "    return prediction\n"
     )
