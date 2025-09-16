@@ -3,7 +3,6 @@ import re
 from openai import AzureOpenAI
 import pandas as pd
 from azure.storage.blob import BlobServiceClient
-from .rules_store import save_rules_body, load_rules_body
 from .rules_repo import extract_rules_body
 
 # ===== 設定（環境変数） =====
@@ -26,10 +25,10 @@ def _has_keys() -> bool:
 
 def choose_rules_body(cand_from_llm: str | None, fallback_default: str = "prediction[:] = '未分類'") -> str:
     """
-    優先度: Blob active > LLM生成候補 > デフォルト
+    優先度: LLM生成候補 > デフォルト
     """
     if cand_from_llm and cand_from_llm.strip():
-        return cand_from_llm
+        return cand_from_llm.strip()
     return fallback_default
 
 # ===== 便利関数 =====
@@ -156,10 +155,6 @@ def generate_rules_body(natural_language: str, base_code: str, df=None) -> str:
 
     if not _has_keys():
         merged = _merge_rules_body(existing_body, "prediction.loc[pd.Series(False, index=df.index)] = '未分類'")
-        try:
-            save_rules_body(merged)
-        except Exception:
-            pass
         return merged
 
     # --- system ---
@@ -231,13 +226,5 @@ def generate_rules_body(natural_language: str, base_code: str, df=None) -> str:
         if "prediction[:]" not in body:
             body = "prediction[:] = '未分類'\n" + body
         body += "\n# ensure at least one assignment\nprediction.loc[pd.Series(False, index=df.index)] = '未分類'"
-    
-    merged = _merge_rules_body(existing_body, body)
 
-    # ✅ AST/禁止項目の検査を通った“後”に保存
-    try:
-        save_rules_body(merged)
-    except Exception as e:
-        print(f"[WARN] failed to persist rules body: {e}")
-
-    return merged
+    return _merge_rules_body(existing_body, body)

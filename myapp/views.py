@@ -8,7 +8,7 @@ from .services import azure_aoai
 from .services.rule_sandbox import run_on_dataframe, SandboxError
 from .services.ml_engine import train_quick, predict_with_pipeline, save_pipeline, load_pipeline, MODELS_DIR
 from .services.rule_patcher import replace_rules_block, unified_diff
-from .services.rules_repo import load_active_full_or_error, save_active_and_history
+from .services.rules_repo import load_active_full_or_error, save_active_and_history, extract_rules_body
 
 def index(request):
     return render(request, "index.html")
@@ -53,7 +53,10 @@ def rules(request):
             rules_body_llm = azure_aoai.generate_rules_body(natural, code_text)
             rules_body = azure_aoai.choose_rules_body(rules_body_llm)
             new_code = replace_rules_block(code_text, rules_body)
-            # ★ ここでは保存はせず、編集欄へ反映のみ（運用に合わせて保存しても良い）
+
+            body_for_save = extract_rules_body(new_code) or rules_body
+            save_active_and_history(full_code=new_code, body_code=body_for_save)
+
             form = RulePromptForm(initial={"natural_language": natural, "code_text": new_code})
             ctx = {"form": form, "generated_code": new_code, "message": "差分をエディタに反映しました。"}
         except Exception as e:
