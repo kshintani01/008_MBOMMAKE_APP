@@ -4,6 +4,7 @@ from openai import AzureOpenAI
 import pandas as pd
 from azure.storage.blob import BlobServiceClient
 from .rules_store import save_rules_body, load_rules_body
+from .rules_repo import extract_rules_body
 
 # ===== 設定（環境変数） =====
 ENDPOINT    = os.getenv("AZURE_OPENAI_ENDPOINT")
@@ -27,14 +28,6 @@ def choose_rules_body(cand_from_llm: str | None, fallback_default: str = "predic
     """
     優先度: Blob active > LLM生成候補 > デフォルト
     """
-    try:
-        active = load_rules_body()  # rules/active/body.py
-    except Exception as e:
-        print(f"[WARN] failed to load active rules from Blob: {e}")
-        active = None
-
-    if active and active.strip():
-        return active
     if cand_from_llm and cand_from_llm.strip():
         return cand_from_llm
     return fallback_default
@@ -78,21 +71,6 @@ def _strip_code_block(text: str) -> str:
     prefer = [p for p in parts if p.lower().startswith("python")]
     block = prefer[0] if prefer else max(parts, key=len)
     return block.replace("python", "", 1).strip()
-
-# # ===== 共通：テキスト抽出（Responses / Chat 両対応） =====
-# def _extract_text_from_responses(resp) -> str:
-#     # 新Responses API
-#     txt = getattr(resp, "output_text", None)
-#     if txt:
-#         return txt
-#     try:
-#         for out in getattr(resp, "output", []) or []:
-#             for c in getattr(out, "content", []) or []:
-#                 if getattr(c, "type", "") in {"output_text", "text"} and getattr(c, "text", ""):
-#                     return c.text
-#     except Exception:
-#         pass
-#     return ""
 
 def _llm_call_system_user(system_text: str, user_text: str) -> str:
     if not _has_keys():
@@ -168,17 +146,13 @@ def generate_rules_body(natural_language: str, base_code: str, df=None) -> str:
     # === RULES:BEGIN === と # === RULES:END === の間に入れる「中身だけ」を返す。
     df: DataFrame（あれば列スキーマをプロンプトに埋め込む）
     """
+    existing_body = extract_rules_body(base_code) or ""
+
     if df is None:
         try:
             df = _load_default_df_from_blob()
         except Exception as e:
-            print(f"[WARN] failed to load default CSV from Blob: {e}")
-    
-    try:
-        existing_body = load_rules_body() or ""
-    except Exception as e:
-        print(f"blob: {e}")
-        existing_body = ""
+            print(f"[WARN] failed to load default CSV from Blob: {e}")        
 
     if not _has_keys():
         merged = _merge_rules_body(existing_body, "prediction.loc[pd.Series(False, index=df.index)] = '未分類'")
@@ -190,22 +164,22 @@ def generate_rules_body(natural_language: str, base_code: str, df=None) -> str:
 
     # --- system ---
     sys_prompt = (
-        "You are a Python data-wrangling assistant.\n"
-        "Task: Output ONLY the ADDITIONAL body lines to append between the markers.\n"
-        "You MUST preserve all existing rules. Do not rewrite, reorder, or delete any existing lines.\n"
-        "Hard requirements:\n"
-        " - NEVER output 'pass'.\n"
-        " - Output only NEW statements to add; DO NOT repeat existing lines.\n"
-        " - Use pandas boolean indexing like: prediction.loc[cond,] = 'ラベル'\n"
-        " - To avoid overwriting existing labels, guard with prediction.isna() when appropriate, e.g.:\n"
-        "     cond = (...)\n"
-        "     prediction.loc[cond & prediction.isna()] = 'ラベル'\n"
-        " - MUST reference at least one EXISTING COLUMN from the provided schema (df['列名']).\n"
-        " - Do NOT invent column names or labels.\n"
-        " - FORBIDDEN: empty-set conditions (df.index.isin([]), .isin([]) with [])\n"
-        " - No imports / I/O / defs / eval/exec / with/try / lambda / globals.\n"
-        " - Use only 'df' and 'prediction'. Do not modify df's schema.\n"
-        "Output executable Python statements ONLY (no fences, no comments unless necessary).\n"
+        "You are a Python data wrangler. Given Japanese natural language rules, "
+        "output ONLY the body lines to insert between '# === RULES:BEGIN ===' and '# === RULES:END ===' "
+        "inside apply_rules(df).\n\n"
+        "Constraints:\n"
+        "- Do NOT define functions/classes/imports/loops; use vectorized pandas only.\n"
+        "- Allowed globals: pd, np, XREF1, XREF2 (ReadOnlyDF, read-only).\n"
+        "- Write predictions to the existing 'prediction' Series. Never overwrite non-null values.\n"
+        "- Use forms like: prediction.loc[cond & prediction.isna()] = 'ラベル'\n\n"
+        "XREF usage:\n"
+        "- XREF1, XREF2 are read-only tables. Example patterns:\n"
+        "  # 1) vlookup-like mapping\n"
+        "  m = XREF2.lookup_map('spec_code', 'class_label')\n"
+        "  prediction.loc[df['spec_code'].map(m).notna() & prediction.isna()] = df['spec_code'].map(m)\n"
+        "  # 2) join (df LEFT JOIN XREF1 on 'part_no')\n"
+        "  _tmp = df.merge(XREF1.df[['part_no','family']], on='part_no', how='left')\n"
+        "  prediction.loc[_tmp['family'].eq('A') & prediction.isna()] = '製作A'\n"
     )
 
     # --- few-shot ---
@@ -257,7 +231,7 @@ def generate_rules_body(natural_language: str, base_code: str, df=None) -> str:
         if "prediction[:]" not in body:
             body = "prediction[:] = '未分類'\n" + body
         body += "\n# ensure at least one assignment\nprediction.loc[pd.Series(False, index=df.index)] = '未分類'"
-
+    
     merged = _merge_rules_body(existing_body, body)
 
     # ✅ AST/禁止項目の検査を通った“後”に保存

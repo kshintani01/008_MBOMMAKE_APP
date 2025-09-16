@@ -5,12 +5,29 @@ from typing import Any, Dict
 
 import pandas as pd
 import numpy as np
+from .xref_loader import load_xref1, load_xref2
+from .readonly import ReadOnlyDF
 
+try:
+    _XREF1 = ReadOnlyDF(load_xref1())
+    _XREF2 = ReadOnlyDF(load_xref2())
+except Exception as e:
+    print(f"[WARN] xref preload failed: {e}")
+    _XREF1 = None
+    _XREF2 = None
+
+ALLOWED_BUILTINS = {"range", "len", "min", "max", "sum", "abs", "all", "any", "enumerate"}
+ALLOWED_GLOBALS = {
+    "pd": pd,
+    "np": np,
+    # 参照テーブル（読み取り専用）
+    "XREF1": _XREF1,  # 例：部品マスタ（ReadOnlyDF）
+    "XREF2": _XREF2,  # 例：仕様→区分マッピング（ReadOnlyDF）
+}
 
 class SandboxError(Exception):
     """安全実行に失敗したときに投げるアプリ固有の例外。"""
     pass
-
 
 # ---- 禁止構文の検査（安全のため最小限に） ---------------------------------
 
@@ -189,3 +206,30 @@ def run_on_dataframe(code: str, df: pd.DataFrame):
         result = result.rename("prediction")
 
     return result
+
+    # rule_sandbox.py（AST 検査のどこか）
+_FORBIDDEN_ASSIGN_TARGETS = {"XREF1", "XREF2"}
+
+def _validate_ast(tree):
+    import ast
+    # 既存チェック...
+    for node in ast.walk(tree):
+        # 代入先名に XREF* が含まれていれば NG
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = []
+            if isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        targets.append(t.id)
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                targets.append(node.target.id)
+            elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+                targets.append(node.target.id)
+            if any(t in _FORBIDDEN_ASSIGN_TARGETS for t in targets):
+                raise ValueError("Assignment to XREF1/XREF2 is not allowed.")
+
+        # 属性経由の代入（XREF1.xxx = ...）を禁止
+        if isinstance(node, (ast.Attribute,)) and isinstance(getattr(node, "value", None), ast.Name):
+            if node.value.id in _FORBIDDEN_ASSIGN_TARGETS and isinstance(getattr(node, "ctx", None), ast.Store):
+                raise ValueError("Mutation of XREF1/XREF2 is not allowed.")
+

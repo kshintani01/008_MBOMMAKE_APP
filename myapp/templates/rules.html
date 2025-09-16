@@ -8,34 +8,77 @@
     下の入力欄にルールを書いて「コード生成」を押すと、自動で Python コードが生成されます。
   </p>
 
-  <!-- ▼ 追加：注意と良い例 / 悪い例 -->
+   <!-- ▼ 参照データ（XREF1/XREF2）対応版の書き方ヘルプ -->
   <details class="hint" style="margin:12px 0;">
-    <summary><strong>書き方の注意（クリックで開く）</strong></summary>
+    <summary><strong>書き方の注意 & 参照データ（XREF1 / XREF2）の使い方</strong></summary>
+
     <ul>
-      <li>NGワード: <code>True</code> / <code>False</code> / <code>if</code> / <code>for</code> / <code>while</code> / <code>import</code> などは使えません（自動生成コードで検出されるとエラー）。</li>
-      <li>OKな書き方: 真偽は <em>数値や文字列</em> で表現してください（例: 「1=真」「'true'」「'yes'」）。</li>
-      <li>分岐は <code>prediction.loc[条件] = 'ラベル'</code> の形で書かれます。複雑なロジックでも <code>&amp;</code>, <code>|</code> で合成します。</li>
+      <li><strong>NGワード：</strong><code>import</code> / <code>exec</code> / <code>eval</code> / <code>if</code> / <code>for</code> / <code>while</code> などは使えません（検出時はエラー）。</li>
+      <li><strong>分岐方法：</strong><code>prediction.loc[条件 &amp; prediction.isna()] = 'ラベル'</code> の形で記述します。条件は <code>&amp;</code> / <code>|</code> で合成。</li>
+      <li><strong>真偽値：</strong>真偽は数値や文字列で表現（例：<code>1</code> / <code>'true'</code> / <code>'yes'</code>）。</li>
+      <li><strong>参照データ：</strong><code>XREF1</code> / <code>XREF2</code> は <em>読み取り専用</em>（代入や書換えは不可）。</li>
     </ul>
+
+    <div class="card" style="padding:8px;margin:8px 0;">
+      <div><strong>利用可能な参照データ</strong></div>
+      <ul>
+        <li><code>XREF1</code>：部品マスタ等  
+          {% if xref1_cols and xref1_cols|length %}
+            <div class="hint">カラム例：<code>{{ xref1_cols|join:", " }}</code></div>
+          {% else %}
+            <div class="hint">（カラム情報は未取得）</div>
+          {% endif %}
+        </li>
+        <li><code>XREF2</code>：仕様→区分マッピング等  
+          {% if xref2_cols and xref2_cols|length %}
+            <div class="hint">カラム例：<code>{{ xref2_cols|join:", " }}</code></div>
+          {% else %}
+            <div class="hint">（カラム情報は未取得）</div>
+          {% endif %}
+        </li>
+      </ul>
+      {% if not xref1_available or not xref2_available %}
+        <p class="err">※ 参照ファイルの読み込みに失敗している可能性があります（XREF が None）。設定と接続をご確認ください。</p>
+      {% endif %}
+    </div>
+
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
       <div class="card">
         <div><strong>悪い例（NG）</strong></div>
-        <pre>sample が True のとき「製作A」</pre>
-      </div>
-      <div class="card">
-        <div><strong>良い例（OK）</strong></div>
-        <pre>sample が 1 または 'true' のとき「製作A」</pre>
-      </div>
-      <div class="card">
-        <div><strong>悪い例（NG）</strong></div>
-        <pre>if 数量 &gt; 10 なら …</pre>
+        <pre>if 数量 &gt; 10 なら「製作A」</pre>
       </div>
       <div class="card">
         <div><strong>良い例（OK）</strong></div>
         <pre>数量が10を超え、品目区分が「加工」のとき「部品製作」</pre>
       </div>
     </div>
+
+    <hr style="margin:12px 0;">
+
+    <div class="card" style="padding:8px;">
+      <div><strong>サンプル1：vlookup 的マッピング（XREF2 を使う）</strong></div>
+      <p class="hint">例：入力の <code>spec_code</code> を XREF2 の <code>class_label</code> に写経して付与</p>
+      <pre>
+  m = XREF2.lookup_map('spec_code', 'class_label')
+  prediction.loc[df['spec_code'].map(m).notna() &amp; prediction.isna()] = df['spec_code'].map(m)
+      </pre>
+    </div>
+
+    <div class="card" style="padding:8px; margin-top:8px;">
+      <div><strong>サンプル2：結合して条件判定（XREF1 を使う）</strong></div>
+      <p class="hint">例：入力の <code>part_no</code> を XREF1 の <code>family</code> と突合し、該当なら「製作A」</p>
+      <pre>
+  _tmp = df.merge(XREF1.df[['part_no', 'family']], on='part_no', how='left')
+  prediction.loc[_tmp['family'].eq('A') &amp; prediction.isna()] = '製作A'
+      </pre>
+    </div>
+
+    <p class="hint" style="margin-top:8px;">
+      ※ <code>XREF1</code>/<code>XREF2</code> は読み取り専用です。<code>XREF1[...] = ...</code> や <code>XREF2.xxx = ...</code> は禁止です。
+    </p>
   </details>
-  <!-- ▲ 追加ここまで -->
+  <!-- ▲ 参照データ対応ヘルプここまで -->
+
 
   <label>自然言語のルール（製作種別に関する条件を記載してください）</label>
   {{ form.natural_language }}

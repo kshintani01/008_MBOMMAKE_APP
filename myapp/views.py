@@ -8,16 +8,20 @@ from .services import azure_aoai
 from .services.rule_sandbox import run_on_dataframe, SandboxError
 from .services.ml_engine import train_quick, predict_with_pipeline, save_pipeline, load_pipeline, MODELS_DIR
 from .services.rule_patcher import replace_rules_block, unified_diff
-from .services.rules_repo import save_version, load_base_code
+from .services.rules_repo import load_active_full_or_error, save_active_and_history
 
 def index(request):
     return render(request, "index.html")
 
 def rules(request):
     if request.method == "GET":
-        base_code = load_base_code(prefer_tag="approved")
-        form = RulePromptForm(initial={"code_text": base_code})
-        return render(request, "rules.html", {"form": form})
+        try:
+            code = load_active_full_or_error()  # ★ Blob の active/full.py を読む
+            form = RulePromptForm(initial={"code_text": code})
+            return render(request, "rules.html", {"form": form})
+        except Exception as e:
+            form = RulePromptForm(initial={"code_text": ""})
+            return render(request, "rules.html", {"form": form, "error": f"アクティブなルールを取得できません: {e}"})
 
     # POST
     form = RulePromptForm(request.POST, request.FILES)
@@ -27,67 +31,46 @@ def rules(request):
     if not form.is_valid():
         ctx["error"] = "入力を確認してください"
         return render(request, "rules.html", ctx)
-    
-    natural = form.cleaned_data.get("natural_language") or ""
-    code_text = form.cleaned_data.get("code_text") or ""
-    target_col = "製作種別"
-    csv_file = form.cleaned_data.get("csv_file")
 
-    # 1) 差分生成
+    natural = form.cleaned_data.get("natural_language") or ""
+    code_text = form.cleaned_data.get("code_text") or ""   # ここには“フル関数”が入ってくる想定
+    csv_file = form.cleaned_data.get("csv_file")
+    target_col = "製作種別"
+
     if action == "generate_block":
         try:
             rules_body_llm = azure_aoai.generate_rules_body(natural, code_text)
             rules_body = azure_aoai.choose_rules_body(rules_body_llm)
             new_code = replace_rules_block(code_text, rules_body)
             diff_text = unified_diff(code_text, new_code, "base.py", "new.py")
-            ctx.update({
-                "form": form,
-                "generated_code": new_code,   # 参考表示（使わなくても良い）
-                "diff_text": diff_text,
-                "message": "差分を生成しました。確認してください。"
-            })
+            ctx.update({"form": form, "generated_code": new_code, "diff_text": diff_text, "message": "差分を生成しました。"})
         except Exception as e:
-            ctx.update({
-                "form": form,
-                "generated_code": code_text,
-                "error": f"差分生成に失敗しました: {e}",
-            })
+            ctx.update({"form": form, "generated_code": code_text, "error": f"差分生成に失敗しました: {e}"})
         return render(request, "rules.html", ctx)
 
-    # 2) 差分をエディタへ反映
     if action == "apply_to_editor":
-        # 直前の生成結果（new_code）を hidden で受け取る構成ならそれを採用
-        # ここでは簡略化して、もう一度生成
         try:
             rules_body_llm = azure_aoai.generate_rules_body(natural, code_text)
             rules_body = azure_aoai.choose_rules_body(rules_body_llm)
             new_code = replace_rules_block(code_text, rules_body)
-
-            form = RulePromptForm(initial={
-                "natural_language": natural,
-                "code_text": new_code,
-            })
-            ctx = {
-                "form": form,
-                "generated_code": new_code,
-                "message": "差分をエディタに反映しました。"
-            }
+            # ★ ここでは保存はせず、編集欄へ反映のみ（運用に合わせて保存しても良い）
+            form = RulePromptForm(initial={"natural_language": natural, "code_text": new_code})
+            ctx = {"form": form, "generated_code": new_code, "message": "差分をエディタに反映しました。"}
         except Exception as e:
             ctx.update({"form": form, "error": f"反映に失敗: {e}"})
         return render(request, "rules.html", ctx)
 
-    # 3) 差分を適用して実行→CSVダウンロード（＆保存）
     if action == "apply_and_run":
         if not csv_file:
             ctx.update({"form": form, "error": "CSV を選択してください"})
             return render(request, "rules.html", ctx)
         try:
-            # 差分適用コードを得る
+            # 1) ボディ生成＋フルへ埋め込み
             rules_body_llm = azure_aoai.generate_rules_body(natural, code_text)
             rules_body = azure_aoai.choose_rules_body(rules_body_llm)
             new_code = replace_rules_block(code_text, rules_body)
 
-            # 実行
+            # 2) 実行（サンドボックス）
             df = pd.read_csv(csv_file)
             pred = run_on_dataframe(new_code, df)
 
@@ -96,10 +79,10 @@ def rules(request):
             else:
                 df[target_col] = pred
 
-            # バージョン保存（承認前は "draft" タグ）
-            save_version(new_code, tag="draft")
+            # 3) ★ 保存：active と history の両方に保存（Blob のみ）
+            save_active_and_history(full_code=new_code, body_code=rules_body)
 
-            # ダウンロード返却
+            # 4) ダウンロード返却
             buf = io.StringIO()
             df.to_csv(buf, index=False)
             resp = HttpResponse(buf.getvalue(), content_type="text/csv")

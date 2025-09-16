@@ -22,10 +22,12 @@ AZURE_OPENAI_DEPLOYMENT=os.getenv("AZURE_OPENAI_DEPLOYMENT")
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-RULES_DIR = BASE_DIR / "var" / "rules"
-RULES_DIR.mkdir(parents=True, exist_ok=True)
-
-RULES_TEMPLATE_PATH = BASE_DIR / "myapp" / "services" / "rule_templates" / "base_rules.py"
+AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+AZURE_STORAGE_CONTAINER = os.getenv("AZURE_STORAGE_CONTAINER", "your-container")
+# ルール保存用のプレフィックス（“疑似ディレクトリ”）
+RULES_BLOB_PREFIX = os.getenv("RULES_BLOB_PREFIX", "rules/")  # 例: rules/
+# Blob を有効にするか（接続情報が揃っていれば自動ONでもOK）
+USE_BLOB_RULES = bool(AZURE_STORAGE_CONNECTION_STRING and AZURE_STORAGE_CONTAINER)
 
 
 # Quick-start development settings - unsuitable for production
