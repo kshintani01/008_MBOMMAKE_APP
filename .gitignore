@@ -311,4 +311,6 @@ pip-selfcheck.json
 
 # End of https://www.toptal.com/developers/gitignore/api/macos,venv,python,django
 
+Dockerfile
+.dockerignore
 static_schema.py
