@@ -1,5 +1,12 @@
 {% extends 'base.html' %}
 {% block content %}
+{% if messages %}
+  <ul class="alert-list">
+    {% for message in messages %}
+      <li class="alert alert-{{ message.tags }}">{{ message|safe }}</li>
+    {% endfor %}
+  </ul>
+{% endif %}
 <form method="post" enctype="multipart/form-data" class="form">
   {% csrf_token %}
 
@@ -20,25 +27,17 @@
     </ul>
 
     <div class="card" style="padding:8px;margin:8px 0;">
-      <div><strong>利用可能な参照データ</strong></div>
-      <ul>
-        <li><code>XREF1</code>：部品マスタ等  
-          {% if xref1_cols and xref1_cols|length %}
-            <div class="hint">カラム例：<code>{{ xref1_cols|join:", " }}</code></div>
-          {% else %}
-            <div class="hint">（カラム情報は未取得）</div>
-          {% endif %}
-        </li>
-        <li><code>XREF2</code>：仕様→区分マッピング等  
-          {% if xref2_cols and xref2_cols|length %}
-            <div class="hint">カラム例：<code>{{ xref2_cols|join:", " }}</code></div>
-          {% else %}
-            <div class="hint">（カラム情報は未取得）</div>
-          {% endif %}
-        </li>
-      </ul>
-      {% if not xref1_available or not xref2_available %}
-        <p class="err">※ 参照ファイルの読み込みに失敗している可能性があります（XREF が None）。設定と接続をご確認ください。</p>
+      {% if REFERENCE_CSV_01_COLUMNS and REFERENCE_CSV_01_COLUMNS|length > 0 %}
+        <details class="mt-2">
+          <summary>使用可能な列（固定）</summary>
+          <ul>
+            {% for c in REFERENCE_CSV_01_COLUMNS %}
+              <li><code>{{ c }}</code></li>
+            {% endfor %}
+          </ul>
+        </details>
+      {% else %}
+        <p class="text-warning">列スキーマが未設定です。環境変数 REFERENCE_CSV_01_COLUMNS_JSON を登録してください。</p>
       {% endif %}
     </div>
 

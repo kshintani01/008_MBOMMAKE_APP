@@ -9,7 +9,7 @@ https://docs.djangoproject.com/en/5.0/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.0/ref/settings/
 """
-import os
+import os, json
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -29,6 +29,20 @@ RULES_BLOB_PREFIX = os.getenv("RULES_BLOB_PREFIX", "rules/")  # 例: rules/
 # Blob を有効にするか（接続情報が揃っていれば自動ONでもOK）
 USE_BLOB_RULES = bool(AZURE_STORAGE_CONNECTION_STRING and AZURE_STORAGE_CONTAINER)
 
+def _parse_json_list(value, default=None):
+    if not value:
+        return default or []
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, list):
+            # 文字列に揃える（安全のため）
+            return [str(x) for x in parsed]
+    except Exception:
+        pass
+    # CSVで入っていた場合の緩和（万一の保険）
+    return [s.strip() for s in value.split(",") if s.strip()]
+
+REFERENCE_CSV_01_COLUMNS = _parse_json_list(os.getenv("REFERENCE_CSV_01_COLUMNS_JSON"), default=[])
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/

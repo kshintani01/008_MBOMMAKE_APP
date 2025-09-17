@@ -2,6 +2,7 @@ import io
 import os
 import pandas as pd
 from django.http import HttpResponse, JsonResponse
+from django.contrib import messages
 from django.shortcuts import render
 from .forms import RulePromptForm, CSVUploadForm
 from .services import azure_aoai
@@ -9,6 +10,14 @@ from .services.rule_sandbox import run_on_dataframe, SandboxError
 from .services.ml_engine import train_quick, predict_with_pipeline, save_pipeline, load_pipeline, MODELS_DIR
 from .services.rule_patcher import replace_rules_block, unified_diff, merge_rules_body_dedup
 from .services.rules_repo import load_active_full_or_error, save_active_and_history, extract_rules_body
+from .services.validators import warn_unknown_columns
+from django.conf import settings
+
+def _with_schema(ctx: dict) -> dict:
+    """テンプレに固定列リストを常に渡す"""
+    ctx = dict(ctx or {})
+    ctx.setdefault("REFERENCE_CSV_01_COLUMNS", getattr(settings, "REFERENCE_CSV_01_COLUMNS", []))
+    return ctx
 
 def index(request):
     return render(request, "index.html")
@@ -18,10 +27,11 @@ def rules(request):
         try:
             code = load_active_full_or_error()  # ★ Blob の active/full.py を読む
             form = RulePromptForm(initial={"code_text": code})
-            return render(request, "rules.html", {"form": form})
+            return render(request, "rules.html", _with_schema({"form": form}))       
         except Exception as e:
             form = RulePromptForm(initial={"code_text": ""})
-            return render(request, "rules.html", {"form": form, "error": f"アクティブなルールを取得できません: {e}"})
+            return render(request, "rules.html", _with_schema({"form": form, "error": f"アクティブなルールを取得できません: {e}"}))
+        
 
     # POST
     form = RulePromptForm(request.POST, request.FILES)
@@ -30,7 +40,7 @@ def rules(request):
 
     if not form.is_valid():
         ctx["error"] = "入力を確認してください"
-        return render(request, "rules.html", ctx)
+        return render(request, "rules.html", _with_schema(ctx))
 
     natural = form.cleaned_data.get("natural_language") or ""
     code_text = form.cleaned_data.get("code_text") or ""   # ここには“フル関数”が入ってくる想定
@@ -43,7 +53,7 @@ def rules(request):
             # 空ならそのまま返す
             if not (add_body or "").strip():
                 ctx.update({"form": form, "generated_code": code_text, "message": "追加はありませんでした。"})
-                return render(request, "rules.html", ctx)
+                return render(request, "rules.html", _with_schema(ctx))
 
             existing_body = extract_rules_body(code_text) or ""
             merged_body   = merge_rules_body_dedup(existing_body, add_body)  # ★ 重複除外でマージ
@@ -61,7 +71,7 @@ def rules(request):
             })
         except Exception as e:
             ctx.update({"form": form, "generated_code": code_text, "error": f"差分生成に失敗しました: {e}"})
-        return render(request, "rules.html", ctx)
+        return render(request, "rules.html", _with_schema(ctx))
 
     if action == "apply_to_editor":
         try:
@@ -72,7 +82,7 @@ def rules(request):
             add_body = request.POST.get("generated_addition", "")  # ★ 生成時に hidden に入れておく
             if not (add_body or "").strip():
                 ctx.update({"form": form, "error": "追加分が見つかりません。まずは『差分を生成』を行ってください。"})
-                return render(request, "rules.html", ctx)
+                return render(request, "rules.html", _with_schema(ctx))
 
             merged_body = merge_rules_body_dedup(existing_body, add_body)  # ★ 重複除外でマージ
             new_full    = replace_rules_block(latest_full, merged_body)
@@ -84,19 +94,22 @@ def rules(request):
             ctx = {"form": form, "generated_code": new_full, "message": "最新ルールに追加分をマージして保存しました。"}
         except Exception as e:
             ctx.update({"form": form, "error": f"反映に失敗: {e}"})
-        return render(request, "rules.html", ctx)
+        return render(request, "rules.html", _with_schema(ctx))
 
 
     if action == "apply_and_run":
         if not csv_file:
             ctx.update({"form": form, "error": "CSV を選択してください"})
-            return render(request, "rules.html", ctx)
+            return render(request, "rules.html", _with_schema(ctx))
         try:
             # ① Blobの active/full.py を取得（＝最新の保存版を使う）
             latest_full_code = load_active_full_or_error()
 
             # ② CSV読込（BOM対策でutf-8-sig、必要ならエラー処理）
             df = pd.read_csv(csv_file, encoding="utf-8-sig")
+            msgs = warn_unknown_columns(df)  # settings.REFERENCE_CSV_01_COLUMNS を参照
+            for m in msgs:
+                messages.warning(request, m)
 
             # ③ サンドボックスで apply_rules(df) 実行
             pred = run_on_dataframe(latest_full_code, df)

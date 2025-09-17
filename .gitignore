@@ -310,3 +310,5 @@ pip-selfcheck.json
 .python-version
 
 # End of https://www.toptal.com/developers/gitignore/api/macos,venv,python,django
+
+static_schema.py

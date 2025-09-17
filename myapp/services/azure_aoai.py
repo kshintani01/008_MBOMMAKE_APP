@@ -4,6 +4,7 @@ from openai import AzureOpenAI
 import pandas as pd
 from azure.storage.blob import BlobServiceClient
 from .rules_repo import extract_rules_body
+from django.conf import settings
 
 # ===== 設定（環境変数） =====
 ENDPOINT    = os.getenv("AZURE_OPENAI_ENDPOINT")
@@ -111,13 +112,27 @@ def sanitize_rules_body(body: str) -> str:
         return ""
     return body
 
+def _columns_hint_block() -> str:
+    cols = getattr(settings, "REFERENCE_CSV_01_COLUMNS", []) or []
+    if not cols:
+        return "（列スキーマ未設定。存在する列名のみ参照してください）"
+    # そのまま列名を明示して「発明」を抑止
+    joined = ", ".join(cols)
+    return (
+        "【使用可能な列名（固定・環境変数由来）】\n"
+        f"{joined}\n"
+        "※ 上記にない列名は使わないでください。"
+    )
+
 def build_system_prompt():
-    return ( "You are a Python data wrangler. Given Japanese natural language rules, " 
-            "you will output ONLY Python code that defines a function:\n\n" 
-            "def apply_rules(df):\n" 
-            " # ...\n" 
-            " return prediction\n" 
-            )
+    return (
+        "You are a Python data wrangler. Given Japanese natural language rules, "
+        "output ONLY Python code that fills the RULES block body for apply_rules(df). "
+        "禁止：未知の列を作る、ループ/関数定義/import など。\n"
+        + _columns_hint_block()
+        + "\n"
+        "返すのは # === RULES:BEGIN === と # === RULES:END === の間に入る本文のみ。"
+    )
 
 def generate_code(natural_language: str) -> str:
     if not _has_keys():
@@ -162,13 +177,7 @@ def generate_rules_body(natural_language: str, base_code: str, df=None) -> str:
     # === RULES:BEGIN === と # === RULES:END === の間に入れる「中身だけ」を返す。
     df: DataFrame（あれば列スキーマをプロンプトに埋め込む）
     """
-    existing_body = extract_rules_body(base_code) or ""
-
-    if df is None:
-        try:
-            df = _load_default_df_from_blob()
-        except Exception as e:
-            print(f"[WARN] failed to load default CSV from Blob: {e}")        
+    existing_body = extract_rules_body(base_code) or ""      
 
     if not _has_keys():
         return ""
