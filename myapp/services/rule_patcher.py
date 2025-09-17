@@ -53,12 +53,18 @@ def replace_rules_block(base_code: str, new_rules_body: str) -> str:
     indented_body = "".join(indented_body_lines)
 
     start, end = m.span()
-    prefix = base_code[:start]
-    suffix = base_code[end:]
+    before = base_code[:start]
+    after  = base_code[end:]
 
-    new_block = m.group("prefix") + indented_body + m.group("suffix")
+    begin_line = m.group("prefix")
+    # ★ BEGIN 行の直後に必ず改行を入れる
+    if not begin_line.endswith("\n"):
+        begin_line = begin_line + "\n"
+    # normalized は末尾改行を1つ保証しているので END はそのまま連結でOK
+    end_line = m.group("suffix")
 
-    return prefix + new_block + suffix
+    new_block = begin_line + indented_body + end_line
+    return before + new_block + after
 
 def unified_diff(old: str, new: str, fromfile="base.py", tofile="new.py") -> str:
     return "".join(
@@ -67,3 +73,27 @@ def unified_diff(old: str, new: str, fromfile="base.py", tofile="new.py") -> str
             fromfile=fromfile, tofile=tofile, lineterm=""
         )
     )
+
+def merge_rules_body_dedup(existing: str, addition: str) -> str:
+    """
+    既存RULES本文に追加分をマージ。行単位で重複は除外し、順序は保つ。
+    空行・末尾空白は正規化してから比較。
+    """
+    def norm_lines(s: str) -> list[str]:
+        lines = []
+        for ln in (s or "").splitlines():
+            t = ln.rstrip()
+            if t.strip() == "":
+                continue
+            lines.append(t)
+        return lines
+
+    ex  = norm_lines(existing)
+    add = norm_lines(addition)
+
+    seen = set(ex)
+    for ln in add:
+        if ln not in seen:
+            ex.append(ln)
+            seen.add(ln)
+    return "\n".join(ex)

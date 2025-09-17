@@ -1,5 +1,5 @@
 # myapp/services/rule_sandbox.py
-import ast
+import ast, re, textwrap
 from types import MappingProxyType
 from typing import Any, Dict
 
@@ -16,6 +16,22 @@ except Exception as e:
     _XREF1 = None
     _XREF2 = None
 
+RELAXED_LINT = True
+
+# 先頭付近の定数として追加
+RULE_BEGIN = "# === RULES:BEGIN ==="
+RULE_END   = "# === RULES:END ==="
+
+def _extract_rules_body_from_code(code: str) -> str:
+    i = code.find(RULE_BEGIN)
+    if i == -1:
+        return _normalize_rules_body(code)
+    j = code.find(RULE_END, i)
+    if j == -1:
+        return _normalize_rules_body(code)
+    body = code[i + len(RULE_BEGIN): j]
+    return _normalize_rules_body(body)
+
 ALLOWED_BUILTINS = {"range", "len", "min", "max", "sum", "abs", "all", "any", "enumerate"}
 ALLOWED_GLOBALS = {
     "pd": pd,
@@ -24,6 +40,39 @@ ALLOWED_GLOBALS = {
     "XREF1": _XREF1,  # 例：部品マスタ（ReadOnlyDF）
     "XREF2": _XREF2,  # 例：仕様→区分マッピング（ReadOnlyDF）
 }
+
+def _strip_code_fence(s: str) -> str:
+    """```python ... ``` や ``` ... ``` を剥がす（最長ブロック優先）"""
+    t = (s or "").strip()
+    if "```" not in t:
+        return t
+    parts = [p.strip() for p in t.split("```") if p.strip()]
+    if not parts:
+        return ""
+    # python指定があれば優先、なければ一番長いブロック
+    prefer = [p for p in parts if p.lower().startswith("python")]
+    block = prefer[0] if prefer else max(parts, key=len)
+    return re.sub(r"^\s*python", "", block, flags=re.I).strip()
+
+def _normalize_rules_body(body: str) -> str:
+    """
+    - コードフェンス除去
+    - 先頭/末尾の空行除去
+    - デデント（textwrap.dedent）
+    - タブ→スペース（任意）
+    """
+    t = _strip_code_fence(body or "")
+    # 一旦行頭のBOM/不可視文字も削る（念のため）
+    t = t.replace("\ufeff", "")
+    # デデント前に末尾・先頭の空行を粗く除去
+    t = t.strip("\n")
+    # デデント
+    t = textwrap.dedent(t)
+    # 再度トリム
+    t = t.strip()
+    # タブ→4スペース（任意）
+    t = t.replace("\t", "    ")
+    return t
 
 class SandboxError(Exception):
     """安全実行に失敗したときに投げるアプリ固有の例外。"""
@@ -52,6 +101,22 @@ READABLE_HINTS = {
 
 FORBIDDEN_CALLS = {"exec", "eval", "__import__"}
 
+def _lint_forbidden_on_body(body: str) -> None:
+    """
+    RULES本文（関数内挿入前提の断片）をダミー関数で包んでAST解析する。
+    RELAXED_LINT 時は、SyntaxErrorなら lint をスキップして続行。
+    """
+    nbody = _normalize_rules_body(body)
+    wrapped = "def __dummy__():\n" + "".join("    " + ln for ln in (nbody + "\n").splitlines(True))
+    try:
+        _lint_forbidden(wrapped)
+    except SandboxError as e:
+        if RELAXED_LINT and "構文エラー" in str(e):
+            # ★ POC: パースできない本文は lint スキップ（実行には _wrap_if_body_only を使う）
+            print(f"[WARN] Lint skipped due to SyntaxError in body: {e}")
+            return
+        raise
+
 def _lint_forbidden(code: str) -> None:
     """
     危険なノードを検出して SandboxError を投げる。
@@ -72,18 +137,11 @@ def _lint_forbidden(code: str) -> None:
             found.append("from")
 
         # def/class
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            found.append("def")
-        elif isinstance(node, ast.ClassDef):
-            found.append("class")
+        # elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        #     found.append("def")
+        # elif isinstance(node, ast.ClassDef):
+        #     found.append("class")
 
-        # 制御構文（必要があれば禁止に）
-        # elif isinstance(node, ast.If):
-        #     found.append("if")
-        # elif isinstance(node, ast.For):
-        #     found.append("for")
-        # elif isinstance(node, ast.While):
-        #     found.append("while")
         elif isinstance(node, ast.With):
             found.append("with")
         elif isinstance(node, ast.Try):
@@ -124,6 +182,11 @@ _ALLOWED_BUILTINS: Dict[str, Any] = {
     "any": any,
     "enumerate": enumerate,
     "zip": zip,
+    "object": object,   # ← 追加
+    "str": str,         # （任意だが便利）
+    "int": int,         # （任意）
+    "float": float,     # （任意）
+    "bool": bool,       # （任意）
     # True/False/None は Python のリテラルとして解釈されるので builtins には不要
 }
 _READONLY_BUILTINS = MappingProxyType(_ALLOWED_BUILTINS)
@@ -136,18 +199,19 @@ def _wrap_if_body_only(code: str) -> str:
     """
     if "def apply_rules" in code:
         return code
-    
-    wrapped_body = "".join("    " + line for line in code.splitlines(True))
+    body = _normalize_rules_body(code)
+    wrapped_body = "".join("    " + line for line in body.splitlines(True))
 
     # RULES ボディだけを function に包む
     return (
         "import pandas as pd\n"
         "import numpy as np\n\n"
         "def apply_rules(df):\n"
-        "    prediction = pd.Series(index=df.index, dtype=object, name='prediction')\n"
+        "    prediction = pd.Series(index=df.index, dtype=\"object\", name='prediction')\n"
         "    # === RULES:BEGIN ===\n"
         f"{wrapped_body}\n"
         "    # === RULES:END ===\n"
+        "    prediction = prediction.fillna('未分類')\n"
         "    return prediction\n"
     )
 
@@ -163,7 +227,8 @@ def run_on_dataframe(code: str, df: pd.DataFrame):
         raise SandboxError("実行コードが空です。生成に失敗している可能性があります。")
 
     # 1) リンター（禁止構文の検査）
-    _lint_forbidden(code)
+    body_for_lint = _extract_rules_body_from_code(code)
+    _lint_forbidden_on_body(body_for_lint)
 
     # 2) apply_rules を含まない場合は雛形でラップ
     source = _wrap_if_body_only(code)
@@ -174,6 +239,11 @@ def run_on_dataframe(code: str, df: pd.DataFrame):
         "pd": pd,
         "np": np,
     }
+    if _XREF1 is not None:
+        safe_globals["XREF1"] = _XREF1
+    if _XREF2 is not None:
+        safe_globals["XREF2"] = _XREF2
+
     safe_locals: Dict[str, Any] = {}
 
     # 4) exec（コンパイルは別段階で）

@@ -93,6 +93,7 @@
     <p class="hint">apply_rules(df) を定義してください</p>
     <textarea name="code_text" rows="18" style="width:100%;font-family:monospace;">{{ generated_code }}</textarea>
     <input type="hidden" name="generated_code" value="{{ generated_code|escape }}">
+    <input type="hidden" name="generated_addition" value="{{ generated_addition|default_if_none:''|escape }}">
   {% else %}
     <label>生成/編集するコード</label>
     {{ form.code_text }}
@@ -110,7 +111,7 @@
   {{ form.csv_file }}
 
   <div class="actions">
-    <button type="submit" name="action" value="apply_and_run" class="btn">生成コードでCSVに適用してダウンロード</button>
+    <button type="submit" name="action" value="apply_and_run" class="btn">最新コードでCSVに適用してダウンロード</button>
     <a href="/" class="btn-outline">トップに戻る</a>
   </div>
 

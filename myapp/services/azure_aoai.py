@@ -27,9 +27,8 @@ def choose_rules_body(cand_from_llm: str | None, fallback_default: str = "predic
     """
     優先度: LLM生成候補 > デフォルト
     """
-    if cand_from_llm and cand_from_llm.strip():
-        return cand_from_llm.strip()
-    return fallback_default
+    cand = (cand_from_llm or "").strip()
+    return cand
 
 # ===== 便利関数 =====
 def _looks_empty_condition(body: str) -> bool:
@@ -92,15 +91,33 @@ CODE_EXAMPLE = (
     "    return prediction\n"
 )
 
-# ===== 旧：関数ごと生成するモード =====
+_FORBIDDEN_PATTERNS = [
+    r"prediction\s*\[\s*:\s*\]\s*=",   # prediction[:] = ...
+    r"^\s*prediction\s*=",             # prediction = ...（再束縛）
+    r"^\s*def\s+\w+\s*\(",             # ← 追加: 関数定義
+    r"^\s*class\s+\w+\s*:",            # ← 追加: クラス定義
+    r"^\s*import\s+\w+",               # ← 追加: import
+    r"^\s*from\s+\w+\s+import\s+",     # ← 追加: from ... import ...
+]
+
+def _violates_forbidden(body: str) -> bool:
+    t = body or ""
+    return any(re.search(p, t, flags=re.MULTILINE) for p in _FORBIDDEN_PATTERNS)
+
+def sanitize_rules_body(body: str) -> str:
+    """禁止パターンがある場合は空にして再試行/フォールバックさせる"""
+    body = (body or "").strip()
+    if _violates_forbidden(body):
+        return ""
+    return body
+
 def build_system_prompt():
-    return (
-        "You are a Python data wrangler. Given Japanese natural language rules, "
-        "you will output ONLY Python code that defines a function:\n\n"
-        "def apply_rules(df):\n"
-        "    # ...\n"
-        "    return prediction\n"
-    )
+    return ( "You are a Python data wrangler. Given Japanese natural language rules, " 
+            "you will output ONLY Python code that defines a function:\n\n" 
+            "def apply_rules(df):\n" 
+            " # ...\n" 
+            " return prediction\n" 
+            )
 
 def generate_code(natural_language: str) -> str:
     if not _has_keys():
@@ -154,47 +171,39 @@ def generate_rules_body(natural_language: str, base_code: str, df=None) -> str:
             print(f"[WARN] failed to load default CSV from Blob: {e}")        
 
     if not _has_keys():
-        merged = _merge_rules_body(existing_body, "prediction.loc[pd.Series(False, index=df.index)] = '未分類'")
-        return merged
+        return ""
 
-    # --- system ---
     sys_prompt = (
         "You are a Python data wrangler. Given Japanese natural language rules, "
         "output ONLY the body lines to insert between '# === RULES:BEGIN ===' and '# === RULES:END ===' "
         "inside apply_rules(df).\n\n"
         "Constraints:\n"
         "- Do NOT define functions/classes/imports/loops; use vectorized pandas only.\n"
-        "- Allowed globals: pd, np, XREF1, XREF2 (ReadOnlyDF, read-only).\n"
-        "- Write predictions to the existing 'prediction' Series. Never overwrite non-null values.\n"
-        "- Use forms like: prediction.loc[cond & prediction.isna()] = 'ラベル'\n\n"
-        "XREF usage:\n"
-        "- XREF1, XREF2 are read-only tables. Example patterns:\n"
-        "  # 1) vlookup-like mapping\n"
-        "  m = XREF2.lookup_map('spec_code', 'class_label')\n"
-        "  prediction.loc[df['spec_code'].map(m).notna() & prediction.isna()] = df['spec_code'].map(m)\n"
-        "  # 2) join (df LEFT JOIN XREF1 on 'part_no')\n"
-        "  _tmp = df.merge(XREF1.df[['part_no','family']], on='part_no', how='left')\n"
-        "  prediction.loc[_tmp['family'].eq('A') & prediction.isna()] = '製作A'\n"
+        "- Allowed globals: pd, np, XREF1, XREF2 (read-only).\n"
+        "- prediction is a pandas Series initialized with NaN. You MUST only write labels to rows that are still unset.\n"
+        "- NEVER write lines that assign to the whole series (e.g., 'prediction[:] = ...') or rebind it (e.g., 'prediction = ...').\n"
+        "- ALWAYS use this pattern: prediction.loc[(COND) & prediction.isna()] = 'ラベル'\n\n"
+        "XREF usage hints:\n"
+        "- mapping example: m = XREF2.lookup_map('key', 'label'); v = df['key'].map(m)\n"
+        "- join example: _t = df.merge(XREF1.df[['part_no','family']], on='part_no', how='left')\n"
     )
 
-    # --- few-shot ---
     few_shot = (
-        "【追加の良い例】\n"
         "# 既存には触れず、新しい条件だけを追加。未確定行にだけ付与して上書き防止。\n"
-        "cond = (df['引渡'].astype(str).str.strip() == 'G112')\n"
+        "cond = df['引渡'].astype(str).str.strip().eq('G112')\n"
         "prediction.loc[cond & prediction.isna()] = 'WT137'\n"
     )
 
     schema_text = _format_schema_for_prompt(df)
 
-    # --- user ---
     user_prompt = (
         "次の既存RULES本文を一切変更せず、新しい自然言語ルールを満たす『追加行のみ』を出力してください。\n"
         "既存本文:\n"
         f"-----EXISTING START-----\n{existing_body}\n-----EXISTING END-----\n\n"
         "注意:\n"
         " - 既存行の再出力・変更・削除は厳禁です。\n"
-        " - 追加行は prediction.isna() で既存付与を上書きしないように配慮してください。\n\n"
+        " - 常に prediction.isna() による未確定チェックを併用し、既存付与を上書きしないでください。\n"
+        " - 'prediction[:] = ...' や 'prediction = ...' のような全件代入は禁止です。\n\n"
         f"{schema_text}\n\n"
         f"{few_shot}\n"
         f"[自然言語ルール]\n{natural_language}\n"
@@ -217,14 +226,10 @@ def generate_rules_body(natural_language: str, base_code: str, df=None) -> str:
         if body2 and not _looks_empty_condition(body2) and _references_any_df_column(body2):
             body = body2
 
+    body = sanitize_rules_body(body)
+
     # --- 空 or pass を物理的に回避 ---
     if not body or body.strip() in {"pass", "# 生成結果なし"}:
-        body = "prediction[:] = '未分類'  # fallback"
+        body = "# no-op (fallback): 未確定は full.py の fillna('未分類') で埋められます"
 
-    # --- 最低1本の代入を保証 ---
-    if "prediction.loc[" not in body:
-        if "prediction[:]" not in body:
-            body = "prediction[:] = '未分類'\n" + body
-        body += "\n# ensure at least one assignment\nprediction.loc[pd.Series(False, index=df.index)] = '未分類'"
-
-    return _merge_rules_body(existing_body, body)
+    return body
