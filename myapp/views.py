@@ -13,6 +13,9 @@ from .services.rules_repo import load_active_full_or_error, save_active_and_hist
 from .services.validators import warn_unknown_columns
 from django.conf import settings
 
+XREF1_LABEL = getattr(settings, "XREF1_DISPLAY_NAME", "品質定義.xlsx")
+XREF2_LABEL = getattr(settings, "XREF2_DISPLAY_NAME", "部材アセットマスタ.xlsx")
+
 def _with_schema(ctx: dict) -> dict:
     """テンプレに固定列リストを常に渡す"""
     ctx = dict(ctx or {})
@@ -36,7 +39,9 @@ def rules(request):
     # POST
     form = RulePromptForm(request.POST, request.FILES)
     action = request.POST.get("action")
-    ctx = {"form": form}
+    ctx = {"form": form,
+           "xref1_label": XREF1_LABEL,
+           "xref2_label": XREF2_LABEL}
 
     if not form.is_valid():
         ctx["error"] = "入力を確認してください"

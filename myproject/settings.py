@@ -29,6 +29,9 @@ RULES_BLOB_PREFIX = os.getenv("RULES_BLOB_PREFIX", "rules/")  # 例: rules/
 # Blob を有効にするか（接続情報が揃っていれば自動ONでもOK）
 USE_BLOB_RULES = bool(AZURE_STORAGE_CONNECTION_STRING and AZURE_STORAGE_CONTAINER)
 
+XREF1_DISPLAY_NAME = "品質定義.xlsx"
+XREF2_DISPLAY_NAME = "部材アセットマスタ.xlsx"
+
 def _parse_json_list(value, default=None):
     if not value:
         return default or []

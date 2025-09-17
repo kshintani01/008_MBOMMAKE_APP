@@ -132,6 +132,11 @@ def build_system_prompt():
         + _columns_hint_block()
         + "\n"
         "返すのは # === RULES:BEGIN === と # === RULES:END === の間に入る本文のみ。"
+        " - ユーザー文に出てくる『品質定義』（品質定義.xlsx）は、コードでは XREF1 を参照すること\n"
+        " - ユーザー文に出てくる『部材アセットマスタ』（部材アセットマスタ.xlsx）は、コードでは XREF2 を参照すること\n"
+        " - XREF1/XREF2 は ReadOnlyDF で提供され、DataFrame本体は .df でアクセス可能（例: XREF1.df）\n"
+        " - 参照はベクトル化（merge/map）で行い、ループや import は使用しない\n"
+        " - 既に値が入った prediction は上書きしない（常に mask と併用）\n"
     )
 
 def generate_code(natural_language: str) -> str:
@@ -170,6 +175,14 @@ def _merge_rules_body(existing: str, addition: str) -> str:
         return addition
     return existing + "\n\n" + addition
 
+def _normalize_user_prompt(natural_language: str) -> str:
+    # 全角/表記ゆれの最低限吸収（任意で拡張）
+    s = natural_language
+    s = s.replace("品質定義ファイル", "品質定義")
+    s = s.replace("品質定義表", "品質定義")
+    s = s.replace("部材アセットマスタ", "部材アセットマスタ")  # ここは別表記があれば追加
+    return s
+
 # ===== 新：RULES ブロックの「中身だけ」を生成するモード =====
 def generate_rules_body(natural_language: str, base_code: str, df=None) -> str:
     """
@@ -204,6 +217,7 @@ def generate_rules_body(natural_language: str, base_code: str, df=None) -> str:
     )
 
     schema_text = _format_schema_for_prompt(df)
+    natural_language = _normalize_user_prompt(natural_language)
 
     user_prompt = (
         "次の既存RULES本文を一切変更せず、新しい自然言語ルールを満たす『追加行のみ』を出力してください。\n"
