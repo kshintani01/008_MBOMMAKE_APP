@@ -3,6 +3,8 @@ import re
 from openai import AzureOpenAI
 import pandas as pd
 from azure.storage.blob import BlobServiceClient
+from azure.storage.blob import BlobClient, generate_blob_sas, BlobSasPermissions
+from datetime import datetime, timedelta
 from .rules_repo import extract_rules_body
 from django.conf import settings
 
@@ -160,6 +162,28 @@ def _load_default_df_from_blob() -> pd.DataFrame:
     """Blob Storage からデフォルト CSV を読み込む"""
     if not (BLOB_CONN_STR and BLOB_CONTAINER and BLOB_BLOB_NAME):
         raise RuntimeError("Blob Storage の設定が不足しています")
+    # Prefer SAS URL if account key present
+    account_name = getattr(settings, "AZURE_STORAGE_ACCOUNT_NAME", None)
+    account_key = getattr(settings, "AZURE_STORAGE_ACCOUNT_KEY", None)
+    if not account_name:
+        account_name = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
+    if not account_key:
+        account_key = os.getenv("AZURE_STORAGE_ACCOUNT_KEY")
+
+    if account_name and account_key:
+        sas = generate_blob_sas(
+            account_name=account_name,
+            account_key=account_key,
+            container_name=BLOB_CONTAINER,
+            blob_name=BLOB_BLOB_NAME,
+            permission=BlobSasPermissions(read=True),
+            expiry=datetime.utcnow() + timedelta(hours=1)
+        )
+        url = f"https://{account_name}.blob.core.windows.net/{BLOB_CONTAINER}/{BLOB_BLOB_NAME}?{sas}"
+        client = BlobClient.from_blob_url(url)
+        stream = client.download_blob()
+        return pd.read_csv(stream)
+
     service = BlobServiceClient.from_connection_string(BLOB_CONN_STR)
     blob_client = service.get_blob_client(container=BLOB_CONTAINER, blob=BLOB_BLOB_NAME)
     stream = blob_client.download_blob()

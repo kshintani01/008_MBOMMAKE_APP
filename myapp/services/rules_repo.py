@@ -1,10 +1,11 @@
 # services/rules_repo.py
-import json, hashlib, time, re
+import json, hashlib, time, re, os
 from dataclasses import dataclass
 from typing import Optional, List
 from django.conf import settings
-
 from azure.storage.blob import BlobServiceClient
+from azure.storage.blob import BlobClient, generate_blob_sas, BlobSasPermissions
+from datetime import datetime, timedelta
 
 def _prefix() -> str:
     return settings.RULES_BLOB_PREFIX.rstrip("/") + "/"
@@ -73,6 +74,24 @@ def _list_meta_blob_names(bc: BlobServiceClient) -> List[str]:
     )
 
 def _download_text(bc: BlobServiceClient, blob_name: str) -> Optional[str]:
+    # Try to use account key-based SAS if account credentials are available, otherwise fall back
+    account_name = getattr(settings, "AZURE_STORAGE_ACCOUNT_NAME", None) or os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
+    account_key = getattr(settings, "AZURE_STORAGE_ACCOUNT_KEY", None) or os.getenv("AZURE_STORAGE_ACCOUNT_KEY")
+    if account_name and account_key:
+        sas = generate_blob_sas(
+            account_name=account_name,
+            account_key=account_key,
+            container_name=settings.AZURE_STORAGE_CONTAINER,
+            blob_name=blob_name,
+            permission=BlobSasPermissions(read=True),
+            expiry=datetime.utcnow() + timedelta(hours=1)
+        )
+        url = f"https://{account_name}.blob.core.windows.net/{settings.AZURE_STORAGE_CONTAINER}/{blob_name}?{sas}"
+        client = BlobClient.from_blob_url(url)
+        if not client.exists():
+            return None
+        return client.download_blob().readall().decode("utf-8")
+
     client = bc.get_blob_client(settings.AZURE_STORAGE_CONTAINER, blob_name)
     if not client.exists():
         return None

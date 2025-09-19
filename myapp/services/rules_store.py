@@ -1,7 +1,8 @@
 # rules_store.py
 import os, io, datetime as dt
 from typing import Optional
-from azure.storage.blob import BlobServiceClient, BlobClient
+from azure.storage.blob import BlobServiceClient, BlobClient, generate_blob_sas, BlobSasPermissions
+from datetime import datetime, timedelta
 import pandas as pd  # 既存コードに合わせてインポート可能
 
 BLOB_CONN_STR  = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
@@ -20,6 +21,24 @@ def save_text(path: str, text: str) -> None:
     bc.upload_blob(text.encode("utf-8"), overwrite=True)
 
 def load_text(path: str) -> Optional[str]:
+    # Prefer SAS URL using account key if available
+    account_name = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
+    account_key = os.getenv("AZURE_STORAGE_ACCOUNT_KEY")
+    if account_name and account_key:
+        sas = generate_blob_sas(
+            account_name=account_name,
+            account_key=account_key,
+            container_name=BLOB_CONTAINER,
+            blob_name=path,
+            permission=BlobSasPermissions(read=True),
+            expiry=datetime.utcnow() + timedelta(hours=1)
+        )
+        url = f"https://{account_name}.blob.core.windows.net/{BLOB_CONTAINER}/{path}?{sas}"
+        client = BlobClient.from_blob_url(url)
+        if not client.exists():
+            return None
+        return client.download_blob().readall().decode("utf-8")
+
     bc = _blob(path)
     if not bc.exists():
         return None
