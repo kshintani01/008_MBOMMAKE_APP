@@ -7,16 +7,14 @@ from .rules_repo import extract_rules_body
 from django.conf import settings
 
 # ===== 設定（環境変数） =====
-ENDPOINT    = os.getenv("AZURE_OPENAI_ENDPOINT")
-API_KEY     = os.getenv("AZURE_OPENAI_API_KEY")
-API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
-DEPLOYMENT  = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+ENDPOINT    = settings.AZURE_OPENAI_ENDPOINT
+API_KEY     = settings.AZURE_OPENAI_API_KEY
+API_VERSION = settings.AZURE_OPENAI_API_VERSION
+DEPLOYMENT  = settings.AZURE_OPENAI_DEPLOYMENT
 
-BLOB_CONN_STR   = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-BLOB_CONTAINER  = os.getenv("AZURE_STORAGE_CONTAINER")
-BLOB_BLOB_NAME  = os.getenv("AZURE_STORAGE_DEFAULT_CSV")
-
-_client = AzureOpenAI(api_key=API_KEY, azure_endpoint=ENDPOINT, api_version=API_VERSION)
+BLOB_CONN_STR   = settings.AZURE_STORAGE_CONNECTION_STRING
+BLOB_CONTAINER  = settings.AZURE_STORAGE_CONTAINER
+BLOB_BLOB_NAME  = settings.AZURE_STORAGE_DEFAULT_CSV
 
 BEGIN_MASK = r"# === RULES:BEGIN ==="
 END_MASK = r"# === RULES:END ==="
@@ -74,6 +72,8 @@ def _strip_code_block(text: str) -> str:
 def _llm_call_system_user(system_text: str, user_text: str) -> str:
     if not _has_keys():
         return ""
+    
+    _client = AzureOpenAI(api_key=API_KEY, azure_endpoint=ENDPOINT, api_version=API_VERSION)
 
     resp = _client.chat.completions.create(
         model=DEPLOYMENT,

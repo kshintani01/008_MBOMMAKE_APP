@@ -24,6 +24,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 AZURE_STORAGE_CONTAINER = os.getenv("AZURE_STORAGE_CONTAINER", "your-container")
+AZURE_STORAGE_DEFAULT_CSV = os.getenv("AZURE_STORAGE_DEFAULT_CSV", "df_columns_template/3018_WT_rev6.csv")
+
 # ルール保存用のプレフィックス（“疑似ディレクトリ”）
 RULES_BLOB_PREFIX = os.getenv("RULES_BLOB_PREFIX", "rules/")  # 例: rules/
 # Blob を有効にするか（接続情報が揃っていれば自動ONでもOK）
@@ -56,8 +58,11 @@ SECRET_KEY = 'django-insecure-8g*77lh@*v!n*hdzau5=nk!gtw6ke4qn%=k)zj*6x@h3a$49h_
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
-
+ALLOWED_HOSTS = [
+    "sb-mbommake01.azurewebsites.net",
+    "localhost",
+    "127.0.0.1",
+]
 
 # Application definition
 
