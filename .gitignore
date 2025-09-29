@@ -314,3 +314,5 @@ pip-selfcheck.json
 Dockerfile
 .dockerignore
 static_schema.py
+3018_WT_rev.csv
+models/

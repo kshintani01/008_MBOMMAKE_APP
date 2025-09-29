@@ -1,24 +1,133 @@
 {% extends 'base.html' %}
 {% block content %}
-<form method="post" enctype="multipart/form-data" class="form">
-  {% csrf_token %}
-  <label>CSVファイル</label>
-  {{ form.csv_file }}
+<div class="ml-container">
+  <h2>機械学習による AUTO_WT 予測</h2>
+  <p>Azure AutoML互換モデルを使用してAUTO_WTを予測します</p>
+  
+  <form method="post" enctype="multipart/form-data" class="form">
+    {% csrf_token %}
+    
+    <div class="upload-section">
+      <label for="{{ form.csv_file.id_for_label }}">{{ form.csv_file.label }}</label>
+      {{ form.csv_file }}
+      {% if form.csv_file.help_text %}
+        <small class="help-text">{{ form.csv_file.help_text }}</small>
+      {% endif %}
+    </div>
 
-  <label>目的変数のカラム名</label>
-  {{ form.target_col }}
+    <div class="model-info">
+      <h3>モデル情報</h3>
+      <ul>
+        <li><strong>予測対象</strong>: AUTO_WT（自動重量）</li>
+        <li><strong>アルゴリズム</strong>: MaxAbsScaler + LogisticRegression</li>
+        <li><strong>精度</strong>: 約89%（テストデータ）</li>
+        <li><strong>学習データ</strong>: 3018_WT_rev.csv（1,064件）</li>
+      </ul>
+    </div>
 
-  <label>説明変数（カンマ区切り）</label>
-  {{ form.feature_cols }}
+    <div class="actions">
+      <button class="btn" type="submit">AUTO_WT を予測してCSVダウンロード</button>
+      <a href="/" class="btn-outline">トップに戻る</a>
+    </div>
 
-  <label>モデル選択</label>
-  {{ form.model_choice }}
+    {% if error %}
+      <div class="error-message">
+        <p class="err">{{ error }}</p>
+      </div>
+    {% endif %}
+  </form>
+</div>
 
-  <div class="actions">
-    <button class="btn" type="submit">推論してCSVをダウンロード</button>
-    <a href="/" class="btn-outline">トップに戻る</a>
-  </div>
+<style>
+.ml-container {
+  max-width: 600px;
+  margin: 0 auto;
+  padding: 20px;
+}
 
-  {% if error %}<p class="err">{{ error }}</p>{% endif %}
-</form>
+.upload-section {
+  margin-bottom: 30px;
+  padding: 20px;
+  border: 2px dashed #ddd;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.model-info {
+  background-color: #f8f9fa;
+  padding: 20px;
+  border-radius: 8px;
+  margin-bottom: 30px;
+}
+
+.model-info h3 {
+  margin-top: 0;
+  color: #333;
+}
+
+.model-info ul {
+  list-style-type: none;
+  padding: 0;
+}
+
+.model-info li {
+  padding: 5px 0;
+  border-bottom: 1px solid #eee;
+}
+
+.model-info li:last-child {
+  border-bottom: none;
+}
+
+.help-text {
+  display: block;
+  color: #666;
+  font-style: italic;
+  margin-top: 5px;
+}
+
+.error-message {
+  margin-top: 20px;
+  padding: 15px;
+  background-color: #f8d7da;
+  border: 1px solid #f5c6cb;
+  border-radius: 4px;
+}
+
+.actions {
+  text-align: center;
+}
+
+.btn {
+  background-color: #007bff;
+  color: white;
+  padding: 12px 24px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 16px;
+  margin: 0 10px;
+  text-decoration: none;
+  display: inline-block;
+}
+
+.btn:hover {
+  background-color: #0056b3;
+}
+
+.btn-outline {
+  background-color: transparent;
+  color: #007bff;
+  border: 2px solid #007bff;
+  padding: 10px 22px;
+  border-radius: 6px;
+  text-decoration: none;
+  display: inline-block;
+}
+
+.btn-outline:hover {
+  background-color: #007bff;
+  color: white;
+}
+</style>
 {% endblock %}

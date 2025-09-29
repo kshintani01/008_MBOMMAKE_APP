@@ -7,7 +7,7 @@ from django.shortcuts import render
 from .forms import RulePromptForm, CSVUploadForm
 from .services import azure_aoai
 from .services.rule_sandbox import run_on_dataframe, SandboxError
-from .services.ml_engine import train_quick, predict_with_pipeline, save_pipeline, load_pipeline, MODELS_DIR
+from .services.ml_engine import train_quick, predict_with_pipeline, save_pipeline, load_pipeline, load_automl_model, predict_with_automl_model, MODELS_DIR
 from .services.rule_patcher import replace_rules_block, unified_diff, merge_rules_body_dedup
 from .services.rules_repo import load_active_full_or_error, save_active_and_history, extract_rules_body
 from .services.validators import warn_unknown_columns
@@ -145,42 +145,36 @@ def ml(request):
         form = CSVUploadForm(request.POST, request.FILES)
         if form.is_valid():
             csvf = form.cleaned_data["csv_file"]
-            target_col = form.cleaned_data["target_col"]
-            feature_cols_raw = form.cleaned_data.get("feature_cols")
-            feature_cols = [c.strip() for c in feature_cols_raw.split(",") if c.strip()] if feature_cols_raw else None
-            model_choice = form.cleaned_data["model_choice"]
 
             try:
                 df = pd.read_csv(csvf)
-                if target_col not in df.columns:
-                    return render(request, "ml.html", {"form": form, "error": f"目的変数 {target_col} がCSVにありません"})
+                
+                # Azure AutoML互換モデルを使用（固定）
+                automl_path = MODELS_DIR / "automl_model.pkl"
+                if not automl_path.exists():
+                    return render(request, "ml.html", {"form": form, "error": f"Azure AutoMLモデル ({automl_path}) が見つかりません。models/automl_model_trainer.pyを実行してモデルを学習してください。"})
+                
+                try:
+                    model_data = load_automl_model(automl_path)
+                    pred = predict_with_automl_model(df, model_data)
+                    target_col = model_data['target_column']  # AUTO_WT
+                    
+                    # 結果をCSVに追加
+                    out = df.copy()
+                    out[f"predicted_{target_col}"] = pred
 
-                if model_choice == "load-joblib":
-                    path = MODELS_DIR / "xgb_std_pipeline.joblib"
-                    if not path.exists():
-                        return render(request, "ml.html", {"form": form, "error": f"{path} が見つかりません。auto-train を選択してください。"})
-                    pipe, _ = load_pipeline(path)
-                else:
-                    # アップロードCSVで簡易学習
-                    tr = train_quick(df.copy(), target_col, feature_cols)
-                    pipe = tr.pipeline
-                    save_pipeline(tr, MODELS_DIR / "xgb_std_pipeline.joblib")
-
-
-                pred = predict_with_pipeline(df, target_col, pipe)
-                out = df.copy()
-                out[f"predicted_{target_col}"] = pred
-
-
-                buf = io.StringIO()
-                out.to_csv(buf, index=False)
-                resp = HttpResponse(buf.getvalue(), content_type="text/csv")
-                resp["Content-Disposition"] = "attachment; filename=ml_result.csv"
-                return resp
-
+                    # CSVダウンロード
+                    buf = io.StringIO()
+                    out.to_csv(buf, index=False)
+                    resp = HttpResponse(buf.getvalue(), content_type="text/csv")
+                    resp["Content-Disposition"] = "attachment; filename=automl_prediction_result.csv"
+                    return resp
+                    
+                except Exception as e:
+                    return render(request, "ml.html", {"form": form, "error": f"Azure AutoMLモデルでの予測に失敗: {e}"})
 
             except Exception as e:
-                return render(request, "ml.html", {"form": form, "error": f"エラー: {e}"})
+                return render(request, "ml.html", {"form": form, "error": f"CSVファイルの処理でエラーが発生しました: {e}"})
 
     return render(request, "ml.html", ctx)
 

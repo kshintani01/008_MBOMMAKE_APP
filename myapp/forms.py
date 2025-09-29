@@ -16,20 +16,9 @@ class RulePromptForm(forms.Form):
 
 
 class CSVUploadForm(forms.Form):
-    csv_file = forms.FileField(label="CSVファイル")
-    target_col = forms.CharField(label="目的変数のカラム名")
-    feature_cols = forms.CharField(
-    label="説明変数のカンマ区切り（空なら自動選択）",
-    required=False,
-        help_text="例: age,income,area_code"
-    )
-    model_choice = forms.ChoiceField(
-    label="モデル",
-    choices=[
-        ("auto-train", "アップロードCSVで簡易学習して予測"),
-        ("load-joblib", "models/ 配下の学習済みモデルを使用"),
-    ],
-    initial="auto-train",
+    csv_file = forms.FileField(
+        label="CSVファイル",
+        help_text="AUTO_WTを予測するCSVファイルをアップロードしてください"
     )
 
 class RulePromptForm(forms.Form):
