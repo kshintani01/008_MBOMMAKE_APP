@@ -8,13 +8,17 @@ Azure App ServiceからBlob Storageに保存されたMLモデルを読み込む�
 ### 方法1: 接続文字列を使用（開発環境推奨）
 ```bash
 AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=your_account;AccountKey=your_key;EndpointSuffix=core.windows.net"
-AZURE_STORAGE_CONTAINER_NAME="models"
+AZURE_STORAGE_CONTAINER="your-container"
+ML_MODELS_BLOB_PREFIX="models/"
 ```
 
 ### 方法2: Managed Identityを使用（本番環境推奨）
 ```bash
 AZURE_STORAGE_ACCOUNT_NAME="your_storage_account"
-AZURE_STORAGE_CONTAINER_NAME="models"
+# 既存のコンテナを使用（ルール保存等と共通）
+AZURE_STORAGE_CONTAINER="your-container"
+# MLモデル専用フォルダ（オプション、デフォルト: models/）
+ML_MODELS_BLOB_PREFIX="models/"
 ```
 
 ## 設定手順
@@ -32,11 +36,13 @@ az storage account create \
   --sku Standard_LRS
 ```
 
-### 2. コンテナの作成
+### 2. コンテナの設定
 ```bash
-# コンテナ作成
+# 既存のコンテナを使用（例: your-container）
+# その中にmodels/フォルダが自動作成されます
+# 新しいコンテナが必要な場合：
 az storage container create \
-  --name models \
+  --name your-container \
   --account-name mystorageaccount
 ```
 
@@ -57,10 +63,22 @@ az role assignment create \
 ### 1. ローカルでモデルをアップロード
 ```bash
 # 学習済みモデルをBlob Storageにアップロード
+# コンテナ/models/automl_model.pkl として保存されます
 python upload_model_to_blob.py models/automl_model.pkl
 
-# モデル一覧確認
+# モデル一覧確認（models/フォルダ内）
 python upload_model_to_blob.py list
+```
+
+### 2. Blob Storage内の構造
+```
+your-container/
+├── rules/                    # ルール保存用（既存）
+│   ├── active/
+│   └── history/
+└── models/                   # MLモデル用（新規）
+    ├── automl_model.pkl
+    └── other_model.pkl
 ```
 
 ### 2. App Serviceでの動作確認

@@ -20,7 +20,8 @@ class BlobStorageModelManager:
         # 設定から接続文字列を取得（Managed Identityがない場合のフォールバック）
         self.connection_string = getattr(settings, 'AZURE_STORAGE_CONNECTION_STRING', None)
         self.account_name = getattr(settings, 'AZURE_STORAGE_ACCOUNT_NAME', None)
-        self.container_name = getattr(settings, 'AZURE_STORAGE_CONTAINER_NAME', 'models')
+        self.container_name = getattr(settings, 'ML_MODELS_CONTAINER', 'your-container')
+        self.blob_prefix = getattr(settings, 'ML_MODELS_BLOB_PREFIX', 'models/')
         
         # BlobServiceClientを初期化
         if self.connection_string:
@@ -33,6 +34,8 @@ class BlobStorageModelManager:
             self.blob_service_client = BlobServiceClient(account_url=account_url, credential=credential)
         else:
             raise ValueError("Azure Storage設定が不足しています。AZURE_STORAGE_CONNECTION_STRING または AZURE_STORAGE_ACCOUNT_NAME を設定してください。")
+        
+        print(f"MLモデル設定: コンテナ={self.container_name}, プレフィックス={self.blob_prefix}")
     
     def upload_model(self, model_data: Dict[str, Any], blob_name: str) -> bool:
         """
@@ -51,14 +54,15 @@ class BlobStorageModelManager:
             joblib.dump(model_data, buffer)
             buffer.seek(0)
             
-            # Blobにアップロード
+            # Blobにアップロード（プレフィックス付き）
+            full_blob_name = f"{self.blob_prefix}{blob_name}"
             blob_client = self.blob_service_client.get_blob_client(
                 container=self.container_name, 
-                blob=blob_name
+                blob=full_blob_name
             )
             
             blob_client.upload_blob(buffer.getvalue(), overwrite=True)
-            print(f"モデルをBlob Storageにアップロードしました: {blob_name}")
+            print(f"モデルをBlob Storageにアップロードしました: {full_blob_name}")
             return True
             
         except Exception as e:
@@ -76,9 +80,10 @@ class BlobStorageModelManager:
             Dict[str, Any]: モデルデータ（失敗時はNone）
         """
         try:
+            full_blob_name = f"{self.blob_prefix}{blob_name}"
             blob_client = self.blob_service_client.get_blob_client(
                 container=self.container_name, 
-                blob=blob_name
+                blob=full_blob_name
             )
             
             # Blobデータをメモリに読み込み
@@ -88,7 +93,7 @@ class BlobStorageModelManager:
             buffer = io.BytesIO(blob_data)
             model_data = joblib.load(buffer)
             
-            print(f"モデルをBlob Storageからダウンロードしました: {blob_name}")
+            print(f"モデルをBlob Storageからダウンロードしました: {full_blob_name}")
             return model_data
             
         except ResourceNotFoundError:
@@ -115,9 +120,10 @@ class BlobStorageModelManager:
                 cache_dir.mkdir(exist_ok=True)
                 cache_path = cache_dir / blob_name
             
+            full_blob_name = f"{self.blob_prefix}{blob_name}"
             blob_client = self.blob_service_client.get_blob_client(
                 container=self.container_name, 
-                blob=blob_name
+                blob=full_blob_name
             )
             
             # ファイルに直接ダウンロード
@@ -140,8 +146,9 @@ class BlobStorageModelManager:
         """
         try:
             container_client = self.blob_service_client.get_container_client(self.container_name)
-            blob_list = container_client.list_blobs()
-            return [blob.name for blob in blob_list if blob.name.endswith('.pkl')]
+            blob_list = container_client.list_blobs(name_starts_with=self.blob_prefix)
+            # プレフィックスを除いたファイル名を返す
+            return [blob.name[len(self.blob_prefix):] for blob in blob_list if blob.name.endswith('.pkl')]
         except Exception as e:
             print(f"モデル一覧取得エラー: {e}")
             return []
@@ -157,9 +164,10 @@ class BlobStorageModelManager:
             bool: 存在する/しない
         """
         try:
+            full_blob_name = f"{self.blob_prefix}{blob_name}"
             blob_client = self.blob_service_client.get_blob_client(
                 container=self.container_name, 
-                blob=blob_name
+                blob=full_blob_name
             )
             return blob_client.exists()
         except Exception:
