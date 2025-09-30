@@ -7,6 +7,7 @@ openai==1.37.1 # Azure OpenAI 互換の最新1.x系
 python-dotenv==1.0.1
 RestrictedPython==7.4
 azure-storage-blob>=12.0.0
+azure-identity>=1.15.0
 openpyxl==3.1.5
 whitenoise==6.5.0
 gunicorn==20.1.0

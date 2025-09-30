@@ -13,6 +13,14 @@ from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score
 
+# Azure Blob Storage サポート
+try:
+    from .blob_storage import get_blob_manager
+    BLOB_STORAGE_AVAILABLE = True
+except ImportError:
+    BLOB_STORAGE_AVAILABLE = False
+    print("警告: Azure Blob Storageが利用できません。ローカルファイルシステムを使用します。")
+
 MODELS_DIR = Path("models")
 MODELS_DIR.mkdir(exist_ok=True)
 
@@ -90,11 +98,34 @@ def load_pipeline(path: str | os.PathLike):
     obj = load(path)
     return obj["pipeline"], obj.get("classes")
 
-def load_automl_model(model_path: str | os.PathLike):
-    """Azure AutoML互換モデルの読み込み"""
+def load_automl_model(model_path: str | os.PathLike = None, blob_name: str = "automl_model.pkl"):
+    """
+    Azure AutoML互換モデルの読み込み
+    Blob Storageを優先し、フォールバックでローカルファイルを使用
+    
+    Args:
+        model_path: ローカルファイルパス（フォールバック用）
+        blob_name: Blob Storage内のモデル名
+    """
     try:
-        model_data = load(model_path)
-        return model_data
+        # Blob Storageから読み込みを試行
+        if BLOB_STORAGE_AVAILABLE:
+            blob_manager = get_blob_manager()
+            model_data = blob_manager.download_model(blob_name)
+            if model_data is not None:
+                print(f"Blob Storageからモデルを読み込みました: {blob_name}")
+                return model_data
+            else:
+                print(f"Blob Storageにモデルが見つかりません: {blob_name}")
+        
+        # フォールバック: ローカルファイルから読み込み
+        if model_path is not None and os.path.exists(model_path):
+            model_data = load(model_path)
+            print(f"ローカルファイルからモデルを読み込みました: {model_path}")
+            return model_data
+        
+        raise Exception("モデルファイルが見つかりません（Blob Storage・ローカル共に）")
+        
     except Exception as e:
         raise Exception(f"Azure AutoMLモデルの読み込みに失敗: {e}")
 

@@ -149,13 +149,14 @@ def ml(request):
             try:
                 df = pd.read_csv(csvf)
                 
-                # Azure AutoML互換モデルを使用（固定）
-                automl_path = MODELS_DIR / "automl_model.pkl"
-                if not automl_path.exists():
-                    return render(request, "ml.html", {"form": form, "error": f"Azure AutoMLモデル ({automl_path}) が見つかりません。models/automl_model_trainer.pyを実行してモデルを学習してください。"})
-                
+                # Azure AutoML互換モデルを使用（Blob Storage優先）
                 try:
-                    model_data = load_automl_model(automl_path)
+                    # Blob Storageから読み込み（フォールバックでローカル）
+                    automl_path = MODELS_DIR / "automl_model.pkl"
+                    model_data = load_automl_model(
+                        model_path=automl_path if automl_path.exists() else None,
+                        blob_name="automl_model.pkl"
+                    )
                     pred = predict_with_automl_model(df, model_data)
                     target_col = model_data['target_column']  # AUTO_WT
                     
