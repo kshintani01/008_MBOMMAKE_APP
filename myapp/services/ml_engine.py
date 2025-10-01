@@ -21,8 +21,13 @@ except ImportError:
     BLOB_STORAGE_AVAILABLE = False
     print("警告: Azure Blob Storageが利用できません。ローカルファイルシステムを使用します。")
 
-MODELS_DIR = Path("models")
-MODELS_DIR.mkdir(exist_ok=True)
+# Django設定からMODELS_DIRを取得（Docker環境対応）
+try:
+    from django.conf import settings
+    MODELS_DIR = getattr(settings, 'MODELS_DIR', Path("models"))
+except ImportError:
+    MODELS_DIR = Path("models")
+    MODELS_DIR.mkdir(exist_ok=True)
 
 class TrainResult:
     def __init__(self, pipeline, classes, f1=None):

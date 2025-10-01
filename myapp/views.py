@@ -151,8 +151,16 @@ def ml(request):
                 
                 # Azure AutoML互換モデルを使用（Blob Storage優先）
                 try:
-                    # Blob Storageから読み込み（フォールバックでローカル）
+                    # モデルパスのデバッグ情報
                     automl_path = MODELS_DIR / "automl_model.pkl"
+                    print(f"デバッグ: MODELS_DIR = {MODELS_DIR}")
+                    print(f"デバッグ: automl_path = {automl_path}")
+                    print(f"デバッグ: automl_path.exists() = {automl_path.exists()}")
+                    
+                    if automl_path.exists():
+                        print(f"デバッグ: ローカルモデルファイルサイズ = {automl_path.stat().st_size} bytes")
+                    
+                    # Blob Storageから読み込み（フォールバックでローカル）
                     model_data = load_automl_model(
                         model_path=automl_path if automl_path.exists() else None,
                         blob_name="automl_model.pkl"
@@ -172,7 +180,10 @@ def ml(request):
                     return resp
                     
                 except Exception as e:
-                    return render(request, "ml.html", {"form": form, "error": f"Azure AutoMLモデルでの予測に失敗: {e}"})
+                    import traceback
+                    error_detail = traceback.format_exc()
+                    print(f"予測エラーの詳細: {error_detail}")
+                    return render(request, "ml.html", {"form": form, "error": f"Azure AutoMLモデルでの予測に失敗: {e}\n\n詳細:\n{error_detail}"})
 
             except Exception as e:
                 return render(request, "ml.html", {"form": form, "error": f"CSVファイルの処理でエラーが発生しました: {e}"})

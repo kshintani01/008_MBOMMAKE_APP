@@ -1,5 +1,23 @@
 """
-Django settings for AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+Django settings for AZURE_STORAG# MLモデル関連のパス設定（Docker環境対応）
+MODELS_DIR = BASE_DIR / 'models'
+MODELS_DIR.mkdir(exist_ok=True)
+
+AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+AZURE_STORAGE_CONTAINER = os.getenv("AZURE_STORAGE_CONTAINER", "your-container")
+AZURE_STORAGE_DEFAULT_CSV = os.getenv("AZURE_STORAGE_DEFAULT_CSV", "df_columns_template/3018_WT_rev6.csv")
+
+# ルール保存用のプレフィックス（"疑似ディレクトリ"）
+RULES_BLOB_PREFIX = os.getenv("RULES_BLOB_PREFIX", "rules/")  # 例: rules/
+# Blob を有効にするか（接続情報が揃っていれば自動ONでもOK）
+USE_BLOB_RULES = bool(AZURE_STORAGE_CONNECTION_STRING and AZURE_STORAGE_CONTAINER)
+
+# MLモデル用のBlob Storage設定
+AZURE_STORAGE_ACCOUNT_NAME = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
+# MLモデル専用のコンテナ名（既存のAZURE_STORAGE_CONTAINERと同じを使用）
+ML_MODELS_CONTAINER = os.getenv("ML_MODELS_CONTAINER", AZURE_STORAGE_CONTAINER)
+# MLモデル用のBlobプレフィックス（フォルダ構造）
+ML_MODELS_BLOB_PREFIX = os.getenv("ML_MODELS_BLOB_PREFIX", "models/")_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 AZURE_STORAGE_CONTAINER = os.getenv("AZURE_STORAGE_CONTAINER", "your-container")
 AZURE_STORAGE_DEFAULT_CSV = os.getenv("AZURE_STORAGE_DEFAULT_CSV", "df_columns_template/3018_WT_rev6.csv")
 
@@ -33,6 +51,10 @@ AZURE_OPENAI_DEPLOYMENT=os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# MLモデル関連のパス設定（Docker環境対応）
+MODELS_DIR = BASE_DIR / 'models'
+MODELS_DIR.mkdir(exist_ok=True)
 
 AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 AZURE_STORAGE_CONTAINER = os.getenv("AZURE_STORAGE_CONTAINER", "your-container")
@@ -77,7 +99,7 @@ ALLOWED_HOSTS = [
 ]
 
 CSRF_TRUSTED_ORIGINS = [
-    "sb-mbommake01.azurewebsites.net",
+    "https://sb-mbommake01.azurewebsites.net",
 ]
 
 # Application definition
@@ -174,9 +196,10 @@ STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 # ローカル開発で追加の静的ディレクトリがある場合は指定
-STATICFILES_DIRS = [
-    BASE_DIR / 'static',
-]
+# 存在するmyapp/staticディレクトリを使用
+# STATICFILES_DIRS = [
+#     BASE_DIR / 'static',
+# ]
 
 # WhiteNoise の圧縮・キャッシュ設定（本番向け）
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
