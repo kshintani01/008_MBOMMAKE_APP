@@ -7,7 +7,7 @@ from django.shortcuts import render
 from .forms import RulePromptForm, CSVUploadForm
 from .services import azure_aoai
 from .services.rule_sandbox import run_on_dataframe, SandboxError
-from .services.ml_engine import train_quick, predict_with_pipeline, save_pipeline, load_pipeline, load_automl_model, predict_with_automl_model, MODELS_DIR
+from .services.ml_engine import predict_auto
 from .services.rule_patcher import replace_rules_block, unified_diff, merge_rules_body_dedup
 from .services.rules_repo import load_active_full_or_error, save_active_and_history, extract_rules_body
 from .services.validators import warn_unknown_columns
@@ -145,49 +145,16 @@ def ml(request):
         form = CSVUploadForm(request.POST, request.FILES)
         if form.is_valid():
             csvf = form.cleaned_data["csv_file"]
-
             try:
-                df = pd.read_csv(csvf)
-                
-                # Azure AutoML互換モデルを使用（Blob Storage優先）
-                try:
-                    # モデルパスのデバッグ情報
-                    automl_path = MODELS_DIR / "automl_model.pkl"
-                    print(f"デバッグ: MODELS_DIR = {MODELS_DIR}")
-                    print(f"デバッグ: automl_path = {automl_path}")
-                    print(f"デバッグ: automl_path.exists() = {automl_path.exists()}")
-                    
-                    if automl_path.exists():
-                        print(f"デバッグ: ローカルモデルファイルサイズ = {automl_path.stat().st_size} bytes")
-                    
-                    # Blob Storageから読み込み（フォールバックでローカル）
-                    model_data = load_automl_model(
-                        model_path=automl_path if automl_path.exists() else None,
-                        blob_name="automl_model.pkl"
-                    )
-                    pred = predict_with_automl_model(df, model_data)
-                    target_col = model_data['target_column']  # AUTO_WT
-                    
-                    # 結果をCSVに追加
-                    out = df.copy()
-                    out[f"predicted_{target_col}"] = pred
-
-                    # CSVダウンロード
-                    buf = io.StringIO()
-                    out.to_csv(buf, index=False)
-                    resp = HttpResponse(buf.getvalue(), content_type="text/csv")
-                    resp["Content-Disposition"] = "attachment; filename=automl_prediction_result.csv"
-                    return resp
-                    
-                except Exception as e:
-                    import traceback
-                    error_detail = traceback.format_exc()
-                    print(f"予測エラーの詳細: {error_detail}")
-                    return render(request, "ml.html", {"form": form, "error": f"Azure AutoMLモデルでの予測に失敗: {e}\n\n詳細:\n{error_detail}"})
-
+                df = pd.read_csv(csvf, low_memory=False)
+                out = predict_auto(df)  # ← ここで自動切替（Azure or ローカル）
+                buf = io.StringIO()
+                out.to_csv(buf, index=False)
+                resp = HttpResponse(buf.getvalue(), content_type="text/csv")
+                resp["Content-Disposition"] = 'attachment; filename="ml_prediction_result.csv"'
+                return resp
             except Exception as e:
-                return render(request, "ml.html", {"form": form, "error": f"CSVファイルの処理でエラーが発生しました: {e}"})
-
+                return render(request, "ml.html", {"form": form, "error": f"予測に失敗しました: {e}"})
     return render(request, "ml.html", ctx)
 
 def aoai_check(request):

@@ -77,7 +77,7 @@ ALLOWED_HOSTS = [
 ]
 
 CSRF_TRUSTED_ORIGINS = [
-    "sb-mbommake01.azurewebsites.net",
+    "https://sb-mbommake01.azurewebsites.net",
 ]
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
@@ -175,9 +175,8 @@ STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 # ローカル開発で追加の静的ディレクトリがある場合は指定
-STATICFILES_DIRS = [
-    BASE_DIR / 'static',
-]
+_extra_static = BASE_DIR / 'static'
+STATICFILES_DIRS = [_extra_static] if _extra_static.exists() else []
 
 # WhiteNoise の圧縮・キャッシュ設定（本番向け）
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'

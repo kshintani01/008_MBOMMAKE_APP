@@ -16,6 +16,7 @@ from sklearn.metrics import f1_score
 # Azure Blob Storage サポート
 try:
     from .blob_storage import get_blob_manager
+    from .aml_endpoint import AMLConfig, score_via_endpoint
     BLOB_STORAGE_AVAILABLE = True
 except ImportError:
     BLOB_STORAGE_AVAILABLE = False
@@ -88,13 +89,42 @@ def train_quick(df: pd.DataFrame, target_col: str, feature_cols: list[str] | Non
     return TrainResult(pipe, classes=getattr(model, "classes_", None), f1=micro_f1)
 
 
+def predict_with_pipeline(
+    df: pd.DataFrame,
+    target_col=None,           # ← 省略可にする
+    pipeline=None              # ← 省略可にする
+) -> pd.DataFrame:
+    """
+    互換ラッパ：
+    - pipeline/target_col を渡されたらそれを使う
+    - 渡されなければ、従来の AutoML モデル（ローカル or Blob）を自動ロードして推論
+    """
+    # pipeline が渡された場合はそれを使う
+    if pipeline is not None:
+        preds = pipeline.predict(df)
+        pred_col = target_col or os.getenv("ML_PREDICTION_COL", "prediction")
+        out = df.copy()
+        out[pred_col] = preds
+        return out
 
+    # ここから “従来の AutoML モデルを自動ロード” ルート
+    models_dir = getattr(settings, "MODELS_DIR", Path(settings.BASE_DIR) / "models")
+    local_fname = os.getenv("AUTOML_LOCAL_FILENAME", "automl_model.pkl")
+    blob_name   = os.getenv("AUTOML_BLOB_NAME", "automl_model.pkl")
+    local_path  = Path(models_dir) / local_fname
 
-def predict_with_pipeline(df: pd.DataFrame, target_col: str, pipeline: Pipeline) -> pd.Series:
-    feats = [c for c in df.columns if c != target_col]
-    pred = pipeline.predict(df[feats])
-    s = pd.Series(pred, name=f"predicted_{target_col}", index=df.index)
-    return s
+    # 既存のローダと互換に
+    model_data = load_automl_model(
+        model_path=local_path if local_path.exists() else None,
+        blob_name=blob_name
+    )
+    preds = predict_with_automl_model(df, model_data)
+    tgt = model_data.get("target_column", os.getenv("ML_TARGET_COL", "prediction"))
+
+    out = df.copy()
+    out[f"predicted_{tgt}"] = preds
+    return out
+
 
 def save_pipeline(result: TrainResult, path: str | os.PathLike):
     dump({"pipeline": result.pipeline, "classes": result.classes}, path)
@@ -217,3 +247,19 @@ def predict_with_automl_model(df: pd.DataFrame, model_data: dict) -> pd.Series:
         
     except Exception as e:
         raise Exception(f"Azure AutoMLモデルでの予測に失敗: {e}")
+
+def predict_with_azure_endpoint(df: pd.DataFrame) -> pd.DataFrame:
+    """新規: Azure ML オンライン推論エンドポイント経由の推論"""
+    cfg = AMLConfig.from_env()
+    result, meta = score_via_endpoint(df, cfg)
+    # 必要なら meta をログに
+    print("AML expected cols (from template):", meta.get("expected_cols", [])[:30])
+    return result
+
+# 利便: バックエンド選択ラッパ
+def predict_auto(df: pd.DataFrame) -> pd.DataFrame:
+    """環境変数 USE_AZURE_ML_ENDPOINT=1 ならエンドポイント推論、それ以外は既存パイプライン"""
+    use_aml = os.getenv("USE_AZURE_ML_ENDPOINT", "0") in ("1", "true", "True")
+    if use_aml and os.getenv("AML_SCORING_URI"):
+        return predict_with_azure_endpoint(df)
+    return predict_with_pipeline(df)
