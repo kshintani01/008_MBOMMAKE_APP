@@ -22,9 +22,11 @@ class AMLConfig:
     api_key: Optional[str] = os.getenv("AML_API_KEY")
     drop_columns: str = os.getenv("DROP_COLUMNS", "")
     timeout_sec: int = int(os.getenv("AML_TIMEOUT", "60"))
+    connect_timeout_sec: int = int(os.getenv("AML_CONNECT_TIMEOUT", "10"))
     batch_size: int = int(os.getenv("AML_BATCH_SIZE", "256"))
     deployment: Optional[str] = os.getenv("AML_DEPLOYMENT")  # optional header
     prediction_col: str = os.getenv("ML_PREDICTION_COL", "prediction")
+    limit_rows: int = int(os.getenv("AML_LIMIT_ROWS", "0"))
 
     @staticmethod
     def from_env() -> "AMLConfig":
@@ -102,19 +104,21 @@ def _get_bearer(auth_mode: str, api_key: Optional[str]) -> str:
     return cred.get_token("https://ml.azure.com/.default").token
 
 
-def _post(endpoint: str, bearer: str, payload: Dict[str, Any], timeout: int, deployment: Optional[str]) -> requests.Response:
+def _post(endpoint: str, bearer: str, payload: Dict[str, Any], connect_timeout: int, read_timeout: int, deployment: Optional[str]) -> requests.Response:
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {bearer}",
     }
     if deployment:
         headers["azureml-model-deployment"] = deployment
-    return requests.post(endpoint, headers=headers, data=json.dumps(payload), timeout=timeout)
-
+    return requests.post(endpoint, headers=headers, data=json.dumps(payload), timeout=(connect_timeout, read_timeout))
 
 # ====== メイン: エンドポイント推論 ======
 def score_via_endpoint(df: pd.DataFrame, cfg: AMLConfig) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     tpl, expected_cols = _load_template(cfg.template_json_path)
+
+    if cfg.limit_rows and len(df) > cfg.limit_rows:
+        df = df.head(cfg.limit_rows).reset_index(drop=True)
 
     # バッチ分割
     bs = max(1, cfg.batch_size)
@@ -130,45 +134,69 @@ def score_via_endpoint(df: pd.DataFrame, cfg: AMLConfig) -> Tuple[pd.DataFrame, 
 
     preds: List[Any] = []
     raw_responses: List[Any] = []
-
+    print(f">>> AML scoring start: rows={n}, batch_size={bs}, endpoint={cfg.scoring_uri}", flush=True)
+    debug_isolate = os.getenv("AML_DEBUG_ROW_ISOLATION", "0") in ("1", "true", "True")
     for i in range(0, n, bs):
         part = shaped.iloc[i:i+bs].reset_index(drop=True)
         payload = _payload_from_df(part)
-        r = _post(cfg.scoring_uri, bearer, payload, cfg.timeout_sec, cfg.deployment)
+        print(f">>> posting batch {i}-{min(i+bs, n)-1} ({len(part)}) ...", flush=True)
+        r = _post(cfg.scoring_uri, bearer, payload, cfg.connect_timeout_sec, cfg.timeout_sec, cfg.deployment)
         if r.status_code >= 400:
-            # 送信プレビューも返す
-            preview = {"input_data": {"columns": payload["input_data"]["columns"], "rows": len(payload["input_data"]["data"])}}
+             # デプロイ名が不正なら一度だけヘッダ無しで再試行
+             if r.status_code == 404 and cfg.deployment:
+                 try_txt = (r.text or "").lower()
+                 if "deployment could not be found" in try_txt:
+                    r = _post(cfg.scoring_uri, bearer, payload, cfg.connect_timeout_sec, cfg.timeout_sec, deployment=None)
+        if r.status_code >= 400:
+            if debug_isolate and len(payload["input_data"]["data"]) > 1:
+                for j, row in enumerate(payload["input_data"]["data"], start=0):
+                    one = {"input_data": {"columns": payload["input_data"]["columns"], "data": [row]}}
+                    r1 = _post(cfg.scoring_uri, bearer, one, cfg.connect_timeout_sec, cfg.timeout_sec, cfg.deployment)
+                    if r1.status_code >= 400:
+                        start_idx = i + j
+                        raise RuntimeError(
+                            f"HTTP {r1.status_code} at row {start_idx}: {r1.text}\n"
+                            f"Failing row preview: {json.dumps({'input_data': {'columns': one['input_data']['columns'], 'data': [one['input_data']['data'][0]]}}, ensure_ascii=False)[:1500]}"
+                        )     
+            preview = {"input_data": {"columns": payload["input_data"]["columns"], "rows": len(payload['input_data']['data'])}}
             raise RuntimeError(f"HTTP {r.status_code}: {r.text}\n\nPayload preview: {json.dumps(preview, ensure_ascii=False)}")
+
+        # --- ここから応答のJSONパース（★欠けていた部分）---
         try:
             js = r.json()
         except Exception:
             raise RuntimeError(f"JSONデコードに失敗: {r.text[:500]}")
         raw_responses.append(js)
 
-        # 代表的な返却形に対応（AutoML/自作スコアリング）
-        # - {"result": [label, ...]}
-        # - {"predictions": [label, ...]}
-        # - {"output": [label, ...]}
+        # 代表的な返却形に対応
+        # - [label, ...]  ← トップレベル配列
+        # - {"result": [...]}, {"predictions": [...]}, {"output": [...]}
+        # - その他の dict で最初の値が配列
         out = None
-        for key in ("result", "predictions", "output"):
-            if key in js:
-                out = js[key]
-                break
-        if out is None:
-            # もし第一要素に更に入っていれば抽出を試みる
-            if isinstance(js, dict) and js:
+        if isinstance(js, list):
+            out = js
+        elif isinstance(js, dict):
+            for key in ("result", "predictions", "output", "Results", "outputs", "values", "y_pred"):
+                if key in js:
+                    out = js[key]
+                    break
+            if out is None and js:
                 first_val = next(iter(js.values()))
-                if isinstance(first_val, list):
+                if isinstance(first_val, (list, tuple)):
                     out = first_val
         if out is None:
-            # 何が返ったか見えるようにメタへ格納して中断
-            raise RuntimeError(f"推論応答の形式を解釈できませんでした: keys={list(js.keys())}")
+            kind = type(js).__name__
+            hint = f"list(len={len(js)})" if isinstance(js, list) else (f"dict(keys={list(js.keys())})" if isinstance(js, dict) else kind)
+            raise RuntimeError(f"推論応答の形式を解釈できませんでした: type={kind}, hint={hint}")
 
-        # 1次元ラベル配列を想定。スコア等の辞書ならそのまま詰める
-        if isinstance(out, list) and len(out) and isinstance(out[0], (dict, list)):
+        # 配列の中身がスカラーならそのまま、辞書/配列ならオブジェクトとして格納
+        if isinstance(out, list) and len(out) and isinstance(out[0], (dict, list, tuple)):
+            preds.extend(out)
+        elif isinstance(out, list):
             preds.extend(out)
         else:
-            preds.extend(list(out))
+            preds.extend([out])
+        print(">>> batch OK", flush=True)
 
     if len(preds) != n:
         raise RuntimeError(f"返却件数が一致しません (got={len(preds)}, expected={n})")
