@@ -1,5 +1,6 @@
 # myapp/services/aml_endpoint.py
 import os, json, re
+import unicodedata
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Any, Optional
 from datetime import datetime
@@ -64,6 +65,48 @@ def _load_template(template_path: str) -> Tuple[Dict[str, Any], List[str]]:
     except Exception:
         raise RuntimeError("テンプレJSONに 'input_data.columns' が見つかりません。Testタブの columns を含む JSON を保存してください。")
 
+def _normalize_colname(name: str) -> str:
+    """
+    列名の表記ゆれを吸収するための正規化:
+      - NFKC正規化（全角/半角統一）
+      - 前後空白の除去
+      - 半角カナ → 全角（NFKCでほぼ吸収）
+      - 記号の微差は基本そのまま（「-」「_」等は保持）
+    """
+    if name is None:
+        return ""
+    s = unicodedata.normalize("NFKC", str(name))
+    return s.strip()
+
+
+def _reorder_like_template(df: pd.DataFrame, tpl_columns: List[str]) -> Tuple[pd.DataFrame, List[str], List[str]]:
+    """
+    template.json の columns を基準に、名前ベースで df を並べ替える。
+    - 双方の列名に _normalize_colname を適用して突き合わせ
+    - 見つからないテンプレ列は None で埋める
+    - 余剰列はドロップ（AzureMLに送らない）
+    返り値: (整列後DF, 不足テンプレ列, 破棄した余剰列)
+    """
+    # 正規化マップ
+    df_norm_map = {_normalize_colname(c): c for c in df.columns}
+    tpl_norm = [_normalize_colname(c) for c in tpl_columns]
+
+    ordered_series = []
+    missing = []
+    for raw_tpl, norm_tpl in zip(tpl_columns, tpl_norm):
+        if norm_tpl in df_norm_map:
+            ordered_series.append(df[df_norm_map[norm_tpl]])
+        else:
+            missing.append(raw_tpl)
+            ordered_series.append(pd.Series([None] * len(df), index=df.index))
+
+    # 余剰列の検出（テンプレに存在しない列）
+    tpl_norm_set = set(tpl_norm)
+    extras = [orig for norm, orig in df_norm_map.items() if norm not in tpl_norm_set]
+
+    out = pd.concat(ordered_series, axis=1)
+    out.columns = tpl_columns
+    return out, missing, extras
 
 def _shape_df_for_template(df: pd.DataFrame, expected_cols: List[str], drop_cols_csv: str) -> pd.DataFrame:
     # 明示ドロップ（目的変数など）
@@ -103,7 +146,6 @@ def _payload_from_df(df: pd.DataFrame) -> Dict[str, Any]:
 _NUMERIC_LIKE_RE = re.compile(
     r"^\s*[-+]?\d{1,3}(?:,\d{3})*(?:\.\d+)?\s*$|^\s*[-+]?\d+(?:\.\d+)?\s*$"
 )
-_DATE_COL_HINTS = ("日", "date", "Date", "DATE", "日時", "time", "Time", "TIME")
 
 def _coerce_numeric_like_series(s: pd.Series) -> pd.Series:
     # object/string のみ対象
@@ -175,58 +217,71 @@ def score_via_endpoint(df: pd.DataFrame, cfg: AMLConfig) -> Tuple[pd.DataFrame, 
     DEBUG_SHOW_SAMPLE_COL = os.getenv("AML_DEBUG_SAMPLE_COL", "ユニットID")
 
     df = normalize_df_kana(df.copy())
+    df.columns = normalize_columns(list(df.columns))
 
     # テンプレはヘルパで取得（input_data.columns を保証）
-    _, expected_cols_raw = _load_template(cfg.template_json_path)
-    expected_cols = normalize_columns(expected_cols_raw)
+    _, expected_cols_raw = _load_template(cfg.template_json_path)  # テンプレそのまま（表示/送信用）
+    expected_cols_norm = normalize_columns(expected_cols_raw)      # 比較用に正規化
 
     # ① DROP_COLUMNS（正規化してから適用）
     if cfg.drop_columns:
         drops_raw = _normalize_cols_list(cfg.drop_columns)
         drops = set(normalize_columns(drops_raw))
         if drops:
-            expected_cols = [c for c in expected_cols if c not in drops]
+            expected_cols_norm = [c for c in expected_cols_norm if c not in drops]
+            # テンプレ“生”配列からも同じインデックスを落とす（順序保持のため）
+            expected_cols_raw = [raw for raw, norm in zip(expected_cols_raw, normalize_columns(expected_cols_raw)) if norm not in drops]
         drop_targets = [c for c in df.columns if c in drops]
         if drop_targets:
             df = df.drop(columns=drop_targets)
             print(f">>> 明示ドロップ: {drop_targets}")
 
-    # 列差分チェックは正規化後の df.columns と expected_cols で行う
-    actual_cols = list(df.columns)
-    missing = [c for c in expected_cols if c not in actual_cols]
-    extra   = [c for c in actual_cols if c not in expected_cols]
-    if missing or extra:
+    # ★テンプレ順へ“名前ベース”再整列
+    #   - df.columns と expected_cols_norm はどちらも normalize_columns 済み
+    #   - mapping: 正規化名 → 現在の実カラム名
+    norm_to_actual = {c: c for c in df.columns}
+    ordered_actual_cols = []
+    missing_norm = []
+    for norm in expected_cols_norm:
+        if norm in norm_to_actual:
+            ordered_actual_cols.append(norm_to_actual[norm])
+        else:
+            missing_norm.append(norm)
+            ordered_actual_cols.append(None)  # 後で埋める
+
+    # 代表的な差分ログ
+    extra_norm = [c for c in df.columns if c not in set(expected_cols_norm)]
+    if missing_norm or extra_norm:
         print(">>> 列の差分チェック(正規化後)")
-        print(f"  - 期待にあるがCSVに無い列: {missing}")
-        print(f"  - CSVにあるが期待に無い列: {extra}")
+        # 生のテンプレ名も見たいので、missing は raw でも表示
+        missing_raw = [raw for raw, norm in zip(expected_cols_raw, normalize_columns(expected_cols_raw)) if norm in set(missing_norm)]
+        print(f"  - 期待にあるがCSVに無い列(raw): {missing_raw}")
+        print(f"  - CSVにあるが期待に無い列(norm): {extra_norm}")
 
-    # 欠損列は空で補完（推論用に必須）
-    for c in missing:
-        df[c] = None
-    # ② 正規化で列名衝突が起きた場合の去重（左から先勝ち／非NA優先）
-    #    例: ["ユニットID", "ユニットID"] のような重複列を1本にまとめる
-    if df.columns.duplicated().any():
-        dedup = {}
-        for col in df.columns:
-            if col not in dedup:
-                dedup[col] = df[col]
-            else:
-                # 非NA優先で上書きマージ
-                s = dedup[col].copy()
-                mask = s.isna()
-                s.loc[mask] = df[col].loc[mask]
-                dedup[col] = s
-        df = pd.DataFrame(dedup)
+    # 欠損列を None で補間しつつテンプレ順の DataFrame を作る
+    ordered_frames = []
+    for col in ordered_actual_cols:
+        if col is None:
+            ordered_frames.append(pd.Series([None]*len(df), index=df.index))
+        else:
+            ordered_frames.append(df[col])
+    df = pd.concat(ordered_frames, axis=1)
+    # 送信用の見た目として“テンプレの生カラム名”をセット（デバッグもしやすい）
+    df.columns = expected_cols_raw
 
-    # 並び替え（正規化済みテンプレ順）
-    df = df[expected_cols]
+    # ② 正規化で列名衝突が起きた場合の去重は不要（ここではテンプレ順の1本化が完了）
 
     df = _sanitize_values_for_endpoint(df)
 
     if DEBUG_PAYLOAD_PREVIEW:
         print(">>> DEBUG dtypes(after sanitize):", {c: str(t) for c, t in df.dtypes.items()})
-        if DEBUG_SHOW_SAMPLE_COL in df.columns and len(df) > 0:
-            print(f">>> DEBUG sample(after sanitize) '{DEBUG_SHOW_SAMPLE_COL}' =", repr(df[DEBUG_SHOW_SAMPLE_COL].iloc[0]))
+        if DEBUG_SHOW_SAMPLE_COL in normalize_columns(df.columns) and len(df) > 0:
+            # デバッグ列名は正規化して比較、抽出は生名で
+            # 生→正規化の対応
+            raw_by_norm = {n: r for r, n in zip(df.columns, normalize_columns(df.columns))}
+            raw = raw_by_norm.get(normalize_columns([DEBUG_SHOW_SAMPLE_COL])[0], None)
+            if raw:
+                print(f">>> DEBUG sample(after sanitize) '{DEBUG_SHOW_SAMPLE_COL}' =", repr(df[raw].iloc[0]))
 
     if cfg.limit_rows and len(df) > cfg.limit_rows:
         df = df.head(cfg.limit_rows).reset_index(drop=True)
@@ -249,10 +304,15 @@ def score_via_endpoint(df: pd.DataFrame, cfg: AMLConfig) -> Tuple[pd.DataFrame, 
     for i in range(0, n, bs):
         part = shaped.iloc[i:i+bs].reset_index(drop=True)
         if DEBUG_PAYLOAD_PREVIEW:
-            print(">>> DEBUG: columns (sending) =", part.columns.tolist())
-            if DEBUG_SHOW_SAMPLE_COL in part.columns and len(part) > 0:
-                print(f">>> DEBUG: sample '{DEBUG_SHOW_SAMPLE_COL}' value =", repr(part[DEBUG_SHOW_SAMPLE_COL].iloc[0]))
+            print(">>> DEBUG: columns (sending) =", part.columns.tolist()[:30], "...")
+            # 代表1行をプレビュー（ズレ検知）
+            if len(part) > 0:
+                preview = {c: part.iloc[0][c] for c in part.columns[:min(30, len(part.columns))]}
+                print(">>> DEBUG: preview row (first ~30 cols) =", preview)
+
+        # ★_payload_from_df を使わず、“テンプレの生columns＋同順data”で構築
         payload = _payload_from_df(part)
+        
         print(f">>> posting batch {i}-{min(i+bs, n)-1} ({len(part)}) ...", flush=True)
         r = _post(cfg.scoring_uri, bearer, payload, cfg.connect_timeout_sec, cfg.timeout_sec, cfg.deployment)
         if r.status_code >= 400:
@@ -317,4 +377,4 @@ def score_via_endpoint(df: pd.DataFrame, cfg: AMLConfig) -> Tuple[pd.DataFrame, 
 
     result = df.copy()
     result[cfg.prediction_col] = preds
-    return result, {"raw_responses": raw_responses, "expected_cols": expected_cols}
+    return result, {"raw_responses": raw_responses, "expected_cols": expected_cols_norm}
