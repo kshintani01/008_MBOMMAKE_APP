@@ -1,11 +1,13 @@
 # myapp/services/aml_endpoint.py
-import os, json, math
+import os, json, re
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Any, Optional
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 import requests
+from .text_normalizer import normalize_df_kana, normalize_columns
 
 try:
     from azure.identity import DefaultAzureCredential
@@ -38,6 +40,13 @@ class AMLConfig:
             raise RuntimeError("テンプレJSONが見つかりません。.env に TEMPLATE_JSON=./template.json を設定し、Studio Test タブの JSON を保存してください。")
         return AMLConfig(scoring_uri=scoring_uri, template_json_path=template)
 
+# 日付/時間らしさの列名ヒントを拡充
+_DATE_COL_HINTS = (
+    "日", "日付", "年月日", "date", "Date", "DATE",
+    "日時", "time", "Time", "TIME",
+    "時間", "時刻",
+    "引渡", "納期", "期限"
+)
 
 # ====== ヘルパ ======
 def _normalize_cols_list(s: str) -> List[str]:
@@ -91,6 +100,53 @@ def _payload_from_df(df: pd.DataFrame) -> Dict[str, Any]:
     data = [[_to_jsonable(v) for v in row] for row in df.to_numpy()]
     return {"input_data": {"columns": df.columns.tolist(), "data": data}}
 
+_NUMERIC_LIKE_RE = re.compile(
+    r"^\s*[-+]?\d{1,3}(?:,\d{3})*(?:\.\d+)?\s*$|^\s*[-+]?\d+(?:\.\d+)?\s*$"
+)
+_DATE_COL_HINTS = ("日", "date", "Date", "DATE", "日時", "time", "Time", "TIME")
+
+def _coerce_numeric_like_series(s: pd.Series) -> pd.Series:
+    # object/string のみ対象
+    if s.dtype.kind not in ("O", "U", "S"):
+        return s
+    def _one(x):
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return x
+        xs = str(x).strip()
+        if _NUMERIC_LIKE_RE.match(xs):
+            xs = xs.replace(",", "")
+            try:
+                if xs.isdigit() or (xs.startswith(("-", "+")) and xs[1:].isdigit()):
+                    return int(xs)
+                return float(xs)
+            except Exception:
+                return x
+        return x
+    return s.map(_one)
+
+def _coerce_datetime_like_series(name: str, s: pd.Series) -> pd.Series:
+    # 列名ヒントに反応、かつ object/string のみ対象
+    if not any(h in name for h in _DATE_COL_HINTS):
+        return s
+    if s.dtype.kind not in ("O", "U", "S"):
+        return s
+    try:
+        dt = pd.to_datetime(s, errors="coerce", utc=False, infer_datetime_format=True)
+        return dt
+    except Exception:
+        return s
+
+def _sanitize_values_for_endpoint(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    # 1) 数値らしき文字列 → 数値へ
+    obj_cols = out.select_dtypes(include=["object", "string"]).columns
+    for c in obj_cols:
+        out[c] = _coerce_numeric_like_series(out[c])
+    # 2) 日付/時間らしき列名 → datetime へ（_to_jsonable が isoformat にしてくれる）
+    for c in out.columns:
+        out[c] = _coerce_datetime_like_series(c, out[c])
+    return out
+
 
 def _get_bearer(auth_mode: str, api_key: Optional[str]) -> str:
     if auth_mode == "key":
@@ -115,7 +171,62 @@ def _post(endpoint: str, bearer: str, payload: Dict[str, Any], connect_timeout: 
 
 # ====== メイン: エンドポイント推論 ======
 def score_via_endpoint(df: pd.DataFrame, cfg: AMLConfig) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-    tpl, expected_cols = _load_template(cfg.template_json_path)
+    DEBUG_PAYLOAD_PREVIEW = os.getenv("AML_DEBUG_PAYLOAD_PREVIEW", "0") in ("1","true","True")
+    DEBUG_SHOW_SAMPLE_COL = os.getenv("AML_DEBUG_SAMPLE_COL", "ユニットID")
+
+    df = normalize_df_kana(df.copy())
+
+    # テンプレはヘルパで取得（input_data.columns を保証）
+    _, expected_cols_raw = _load_template(cfg.template_json_path)
+    expected_cols = normalize_columns(expected_cols_raw)
+
+    # ① DROP_COLUMNS（正規化してから適用）
+    if cfg.drop_columns:
+        drops_raw = _normalize_cols_list(cfg.drop_columns)
+        drops = set(normalize_columns(drops_raw))
+        if drops:
+            expected_cols = [c for c in expected_cols if c not in drops]
+        drop_targets = [c for c in df.columns if c in drops]
+        if drop_targets:
+            df = df.drop(columns=drop_targets)
+            print(f">>> 明示ドロップ: {drop_targets}")
+
+    # 列差分チェックは正規化後の df.columns と expected_cols で行う
+    actual_cols = list(df.columns)
+    missing = [c for c in expected_cols if c not in actual_cols]
+    extra   = [c for c in actual_cols if c not in expected_cols]
+    if missing or extra:
+        print(">>> 列の差分チェック(正規化後)")
+        print(f"  - 期待にあるがCSVに無い列: {missing}")
+        print(f"  - CSVにあるが期待に無い列: {extra}")
+
+    # 欠損列は空で補完（推論用に必須）
+    for c in missing:
+        df[c] = None
+    # ② 正規化で列名衝突が起きた場合の去重（左から先勝ち／非NA優先）
+    #    例: ["ユニットID", "ユニットID"] のような重複列を1本にまとめる
+    if df.columns.duplicated().any():
+        dedup = {}
+        for col in df.columns:
+            if col not in dedup:
+                dedup[col] = df[col]
+            else:
+                # 非NA優先で上書きマージ
+                s = dedup[col].copy()
+                mask = s.isna()
+                s.loc[mask] = df[col].loc[mask]
+                dedup[col] = s
+        df = pd.DataFrame(dedup)
+
+    # 並び替え（正規化済みテンプレ順）
+    df = df[expected_cols]
+
+    df = _sanitize_values_for_endpoint(df)
+
+    if DEBUG_PAYLOAD_PREVIEW:
+        print(">>> DEBUG dtypes(after sanitize):", {c: str(t) for c, t in df.dtypes.items()})
+        if DEBUG_SHOW_SAMPLE_COL in df.columns and len(df) > 0:
+            print(f">>> DEBUG sample(after sanitize) '{DEBUG_SHOW_SAMPLE_COL}' =", repr(df[DEBUG_SHOW_SAMPLE_COL].iloc[0]))
 
     if cfg.limit_rows and len(df) > cfg.limit_rows:
         df = df.head(cfg.limit_rows).reset_index(drop=True)
@@ -123,12 +234,11 @@ def score_via_endpoint(df: pd.DataFrame, cfg: AMLConfig) -> Tuple[pd.DataFrame, 
     # バッチ分割
     bs = max(1, cfg.batch_size)
     n = len(df)
-    batches = []
     if n == 0:
         return df.copy(), {"raw_responses": [], "notes": "empty input"}
 
     # 列整形（1回でよい）
-    shaped = _shape_df_for_template(df.copy(), expected_cols, cfg.drop_columns)
+    shaped = df.copy()
 
     bearer = _get_bearer(cfg.auth_mode, cfg.api_key)
 
@@ -138,6 +248,10 @@ def score_via_endpoint(df: pd.DataFrame, cfg: AMLConfig) -> Tuple[pd.DataFrame, 
     debug_isolate = os.getenv("AML_DEBUG_ROW_ISOLATION", "0") in ("1", "true", "True")
     for i in range(0, n, bs):
         part = shaped.iloc[i:i+bs].reset_index(drop=True)
+        if DEBUG_PAYLOAD_PREVIEW:
+            print(">>> DEBUG: columns (sending) =", part.columns.tolist())
+            if DEBUG_SHOW_SAMPLE_COL in part.columns and len(part) > 0:
+                print(f">>> DEBUG: sample '{DEBUG_SHOW_SAMPLE_COL}' value =", repr(part[DEBUG_SHOW_SAMPLE_COL].iloc[0]))
         payload = _payload_from_df(part)
         print(f">>> posting batch {i}-{min(i+bs, n)-1} ({len(part)}) ...", flush=True)
         r = _post(cfg.scoring_uri, bearer, payload, cfg.connect_timeout_sec, cfg.timeout_sec, cfg.deployment)

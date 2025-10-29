@@ -13,6 +13,8 @@ from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score
 
+from .text_normalizer import normalize_df_kana
+
 # Azure Blob Storage サポート
 try:
     from .blob_storage import get_blob_manager
@@ -35,6 +37,14 @@ class TrainResult:
         self.pipeline = pipeline
         self.classes = classes
         self.f1 = f1
+
+def predict_auto(df_in: pd.DataFrame) -> pd.DataFrame:
+    """環境変数 USE_AZURE_ML_ENDPOINT=1 ならエンドポイント推論、それ以外はローカル推論。常にNFKC正規化。"""
+    df = normalize_df_kana(df_in.copy())
+    use_aml = os.getenv("USE_AZURE_ML_ENDPOINT", "0") in ("1", "true", "True")
+    if use_aml and os.getenv("AML_SCORING_URI"):
+        return predict_with_azure_endpoint(df)
+    return predict_with_pipeline(df)
 
 def _infer_columns(df: pd.DataFrame, target_col: str, feature_cols: list[str] | None):
     if feature_cols:
@@ -255,11 +265,3 @@ def predict_with_azure_endpoint(df: pd.DataFrame) -> pd.DataFrame:
     # 必要なら meta をログに
     print("AML expected cols (from template):", meta.get("expected_cols", [])[:30])
     return result
-
-# 利便: バックエンド選択ラッパ
-def predict_auto(df: pd.DataFrame) -> pd.DataFrame:
-    """環境変数 USE_AZURE_ML_ENDPOINT=1 ならエンドポイント推論、それ以外は既存パイプライン"""
-    use_aml = os.getenv("USE_AZURE_ML_ENDPOINT", "0") in ("1", "true", "True")
-    if use_aml and os.getenv("AML_SCORING_URI"):
-        return predict_with_azure_endpoint(df)
-    return predict_with_pipeline(df)
