@@ -111,7 +111,7 @@ def rules(request):
             latest_full_code = load_active_full_or_error()
 
             # ② CSV読込（BOM対策でutf-8-sig、必要ならエラー処理）
-            df = pd.read_csv(csv_file, encoding="utf-8-sig")
+            df = _robust_read_csv(csv_file)
             msgs = warn_unknown_columns(df)  # settings.REFERENCE_CSV_01_COLUMNS を参照
             for m in msgs:
                 messages.warning(request, m)
@@ -125,10 +125,7 @@ def rules(request):
             out[f"predicted_{target_col}"] = pred
 
             buf = io.StringIO()
-            out.to_csv(buf, index=False)
-            resp = HttpResponse(buf.getvalue(), content_type="text/csv")
-            resp["Content-Disposition"] = 'attachment; filename="rules_result.csv"'
-            return resp
+            return _csv_response_utf8_bom(out, "rules_result.csv")
 
         except SandboxError as e:
             ctx.update({"form": form, "error": f"サンドボックスエラー: {e}"})
@@ -146,13 +143,9 @@ def ml(request):
         if form.is_valid():
             csvf = form.cleaned_data["csv_file"]
             try:
-                df = pd.read_csv(csvf, low_memory=False)
-                out = predict_auto(df)  # ← ここで自動切替（Azure or ローカル）
-                buf = io.StringIO()
-                out.to_csv(buf, index=False)
-                resp = HttpResponse(buf.getvalue(), content_type="text/csv")
-                resp["Content-Disposition"] = 'attachment; filename="ml_prediction_result.csv"'
-                return resp
+                df = _robust_read_csv(csvf)
+                out = predict_auto(df)
+                return _csv_response_utf8_bom(out, "ml_prediction_result.csv")
             except Exception as e:
                 return render(request, "ml.html", {"form": form, "error": f"予測に失敗しました: {e}"})
     return render(request, "ml.html", ctx)
@@ -164,3 +157,28 @@ def aoai_check(request):
         return JsonResponse({"success": ok, "echo": txt}, status=200 if ok else 502)
     except Exception as e:
         return JsonResponse({"success": False, "error":str(e)}, status=502)
+    
+def _robust_read_csv(uploaded_file) -> pd.DataFrame:
+    """UTF-8(BOM付/無し)→CP932→UTF-8の順で解釈して読み込む"""
+    import io as _io
+    data = uploaded_file.read()
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+    for enc in ("utf-8-sig", "cp932", "utf-8"):
+        try:
+            return pd.read_csv(_io.BytesIO(data), encoding=enc, low_memory=False)
+        except UnicodeDecodeError:
+            continue
+    # 最終フォールバック
+    return pd.read_csv(_io.BytesIO(data), low_memory=False)
+
+def _csv_response_utf8_bom(df: pd.DataFrame, filename: str) -> HttpResponse:
+    import io as _io
+    b = _io.BytesIO()
+    # ← ここを lineterminator に変更
+    df.to_csv(b, index=False, encoding="utf-8-sig", lineterminator="\r\n")
+    resp = HttpResponse(b.getvalue(), content_type="text/csv; charset=utf-8")
+    resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return resp
