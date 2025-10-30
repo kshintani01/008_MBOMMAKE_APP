@@ -42,6 +42,31 @@ class AMLConfig:
     template_blob_path: str = os.getenv("TEMPLATE_BLOB_PATH", "")
     template_cache_buster: str = os.getenv("TEMPLATE_CACHE_BUSTER", "0")  # 値が変わるとキャッシュが無効化
 
+    @classmethod
+    def from_env(cls) -> 'AMLConfig':
+        """環境変数から設定を読み込んでAMLConfigインスタンスを作成"""
+        scoring_uri = os.getenv("AML_SCORING_URI")
+        if not scoring_uri:
+            raise RuntimeError("AML_SCORING_URI環境変数が設定されていません")
+        
+        return cls(
+            scoring_uri=scoring_uri,
+            template_json_path=os.getenv("TEMPLATE_JSON_PATH"),  # 互換性のため
+            auth_mode=os.getenv("AML_AUTH_MODE", "key"),
+            api_key=os.getenv("AML_API_KEY"),
+            drop_columns=os.getenv("DROP_COLUMNS", ""),
+            timeout_sec=int(os.getenv("AML_TIMEOUT", "60")),
+            connect_timeout_sec=int(os.getenv("AML_CONNECT_TIMEOUT", "10")),
+            batch_size=int(os.getenv("AML_BATCH_SIZE", "256")),
+            deployment=os.getenv("AML_DEPLOYMENT"),
+            prediction_col=os.getenv("ML_PREDICTION_COL", "prediction"),
+            storage_conn_str=os.getenv("AZURE_STORAGE_CONNECTION_STRING"),
+            storage_account=os.getenv("AZURE_STORAGE_ACCOUNT_NAME"),
+            template_container=os.getenv("TEMPLATE_CONTAINER", ""),
+            template_blob_path=os.getenv("TEMPLATE_BLOB_PATH", ""),
+            template_cache_buster=os.getenv("TEMPLATE_CACHE_BUSTER", "0")
+        )
+
 
 # 日付/時間らしさの列名ヒントを拡充
 _DATE_COL_HINTS = (
