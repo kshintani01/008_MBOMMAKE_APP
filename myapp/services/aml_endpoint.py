@@ -10,6 +10,11 @@ import pandas as pd
 import requests
 from .text_normalizer import normalize_df_kana, normalize_columns
 
+from functools import lru_cache
+try:
+    from azure.storage.blob import BlobServiceClient
+except Exception:
+    BlobServiceClient = None
 try:
     from azure.identity import DefaultAzureCredential
 except Exception:
@@ -20,26 +25,23 @@ except Exception:
 @dataclass
 class AMLConfig:
     scoring_uri: str
-    template_json_path: str
-    auth_mode: str = os.getenv("AML_AUTH_MODE", "key")  # "key" | "aad"
+    template_json_path: Optional[str]  # 互換のため残すが未使用化
+    auth_mode: str = os.getenv("AML_AUTH_MODE", "key")
     api_key: Optional[str] = os.getenv("AML_API_KEY")
     drop_columns: str = os.getenv("DROP_COLUMNS", "")
     timeout_sec: int = int(os.getenv("AML_TIMEOUT", "60"))
     connect_timeout_sec: int = int(os.getenv("AML_CONNECT_TIMEOUT", "10"))
     batch_size: int = int(os.getenv("AML_BATCH_SIZE", "256"))
-    deployment: Optional[str] = os.getenv("AML_DEPLOYMENT")  # optional header
+    deployment: Optional[str] = os.getenv("AML_DEPLOYMENT")
     prediction_col: str = os.getenv("ML_PREDICTION_COL", "prediction")
-    limit_rows: int = int(os.getenv("AML_LIMIT_ROWS", "0"))
 
-    @staticmethod
-    def from_env() -> "AMLConfig":
-        scoring_uri = os.getenv("AML_SCORING_URI")
-        template = os.getenv("TEMPLATE_JSON")
-        if not scoring_uri:
-            raise RuntimeError("AML_SCORING_URI が未設定です。")
-        if not template or not os.path.exists(template):
-            raise RuntimeError("テンプレJSONが見つかりません。.env に TEMPLATE_JSON=./template.json を設定し、Studio Test タブの JSON を保存してください。")
-        return AMLConfig(scoring_uri=scoring_uri, template_json_path=template)
+    # ▼ 追加：template.json を Blob から読むための設定
+    storage_conn_str: Optional[str] = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+    storage_account: Optional[str] = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
+    template_container: str = os.getenv("TEMPLATE_CONTAINER", "")
+    template_blob_path: str = os.getenv("TEMPLATE_BLOB_PATH", "")
+    template_cache_buster: str = os.getenv("TEMPLATE_CACHE_BUSTER", "0")  # 値が変わるとキャッシュが無効化
+
 
 # 日付/時間らしさの列名ヒントを拡充
 _DATE_COL_HINTS = (
@@ -48,6 +50,44 @@ _DATE_COL_HINTS = (
     "時間", "時刻",
     "引渡", "納期", "期限"
 )
+def _get_blob_service_client(cfg: AMLConfig):
+    if BlobServiceClient is None:
+        raise RuntimeError("azure-storage-blob がインストールされていません")
+    if cfg.storage_conn_str:
+        return BlobServiceClient.from_connection_string(cfg.storage_conn_str)
+    if not cfg.storage_account:
+        raise RuntimeError("Blob接続情報が不足: AZURE_STORAGE_CONNECTION_STRING または AZURE_STORAGE_ACCOUNT_NAME を設定してください")
+    if DefaultAzureCredential is None:
+        raise RuntimeError("azure-identity がインストールされていません")
+    cred = DefaultAzureCredential(exclude_shared_token_cache_credential=True)
+    return BlobServiceClient(
+        account_url=f"https://{cfg.storage_account}.blob.core.windows.net",
+        credential=cred
+    )
+
+@lru_cache(maxsize=1)
+def _load_template_from_blob_cached(container: str, blob_path: str, cache_buster: str,
+                                    conn_str: Optional[str], account: Optional[str]) -> Dict[str, Any]:
+    if not container or not blob_path:
+        raise RuntimeError("TEMPLATE_CONTAINER または TEMPLATE_BLOB_PATH が未設定です")
+    if conn_str:
+        svc = BlobServiceClient.from_connection_string(conn_str)
+    else:
+        if DefaultAzureCredential is None:
+            raise RuntimeError("azure-identity がインストールされていません")
+        cred = DefaultAzureCredential(exclude_shared_token_cache_credential=True)
+        svc = BlobServiceClient(account_url=f"https://{account}.blob.core.windows.net", credential=cred)
+    raw = svc.get_blob_client(container=container, blob=blob_path).download_blob().readall()
+    tpl = json.loads(raw.decode("utf-8"))
+    if "input_data" not in tpl or "columns" not in tpl["input_data"]:
+        raise RuntimeError("テンプレJSONに 'input_data.columns' が見つかりません。")
+    return tpl
+
+def load_template_json(cfg: AMLConfig) -> Dict[str, Any]:
+    return _load_template_from_blob_cached(
+        cfg.template_container, cfg.template_blob_path, cfg.template_cache_buster,
+        cfg.storage_conn_str, cfg.storage_account
+    )
 
 # ====== ヘルパ ======
 def _normalize_cols_list(s: str) -> List[str]:
@@ -219,9 +259,9 @@ def score_via_endpoint(df: pd.DataFrame, cfg: AMLConfig) -> Tuple[pd.DataFrame, 
     df = normalize_df_kana(df.copy())
     df.columns = normalize_columns(list(df.columns))
 
-    # テンプレはヘルパで取得（input_data.columns を保証）
-    _, expected_cols_raw = _load_template(cfg.template_json_path)  # テンプレそのまま（表示/送信用）
-    expected_cols_norm = normalize_columns(expected_cols_raw)      # 比較用に正規化
+    _tpl = load_template_json(cfg)
+    expected_cols_raw = _tpl["input_data"]["columns"]
+    expected_cols_norm = normalize_columns(expected_cols_raw)
 
     # ① DROP_COLUMNS（正規化してから適用）
     if cfg.drop_columns:
@@ -283,8 +323,9 @@ def score_via_endpoint(df: pd.DataFrame, cfg: AMLConfig) -> Tuple[pd.DataFrame, 
             if raw:
                 print(f">>> DEBUG sample(after sanitize) '{DEBUG_SHOW_SAMPLE_COL}' =", repr(df[raw].iloc[0]))
 
-    if cfg.limit_rows and len(df) > cfg.limit_rows:
-        df = df.head(cfg.limit_rows).reset_index(drop=True)
+    limit_rows = getattr(cfg, "limit_rows", None)
+    if limit_rows and len(df) > limit_rows:
+        df = df.head(limit_rows).reset_index(drop=True)
 
     # バッチ分割
     bs = max(1, cfg.batch_size)
