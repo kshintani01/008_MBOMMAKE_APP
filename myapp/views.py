@@ -5,7 +5,7 @@ from django.http import HttpResponse, JsonResponse
 from django.contrib import messages
 from django.shortcuts import render
 from .forms import RulePromptForm, CSVUploadForm
-from .services import azure_aoai
+from .services import azure_aoai, rules_repo
 from .services.rule_sandbox import run_on_dataframe, SandboxError
 from .services.ml_engine import predict_auto
 from .services.rule_patcher import replace_rules_block, unified_diff, merge_rules_body_dedup
@@ -17,9 +17,14 @@ XREF1_LABEL = getattr(settings, "XREF1_DISPLAY_NAME", "品質定義.xlsx")
 XREF2_LABEL = getattr(settings, "XREF2_DISPLAY_NAME", "部材アセットマスタ.xlsx")
 
 def _with_schema(ctx: dict) -> dict:
-    """テンプレに固定列リストを常に渡す"""
+    """テンプレに固定列リストと active_code を常に渡す"""
     ctx = dict(ctx or {})
     ctx.setdefault("REFERENCE_CSV_01_COLUMNS", getattr(settings, "REFERENCE_CSV_01_COLUMNS", []))
+    # 保存済みコード（無ければ空文字）
+    try:
+      ctx.setdefault("active_code", rules_repo.get_active_full_code())
+    except Exception:
+      ctx.setdefault("active_code", "")
     return ctx
 
 def index(request):
@@ -30,7 +35,7 @@ def rules(request):
         try:
             code = load_active_full_or_error()  # ★ Blob の active/full.py を読む
             form = RulePromptForm(initial={"code_text": code})
-            return render(request, "rules.html", _with_schema({"form": form}))       
+            return render(request, "rules.html", _with_schema({"form": form, "editor_code": code, "active_code": code}))       
         except Exception as e:
             form = RulePromptForm(initial={"code_text": ""})
             return render(request, "rules.html", _with_schema({"form": form, "error": f"アクティブなルールを取得できません: {e}"}))
@@ -64,7 +69,13 @@ def rules(request):
             merged_body   = merge_rules_body_dedup(existing_body, add_body)  # ★ 重複除外でマージ
             new_code      = replace_rules_block(code_text, merged_body)      # ★ 置換はマージ後の本文で
 
-            diff_text = unified_diff(code_text, new_code, "base.py", "new.py")
+            diff_text = unified_diff(
+                existing_body,               # 旧：ルール本文のみ
+                merged_body,                 # 新：ルール本文のみ
+                "RULES_BODY(old)",
+                "RULES_BODY(new)",
+                context=0                    # ← 変更行だけ（コンテキストなし）
+            )
             # ★ 追加分を hidden に保持（反映時に使う）
             form = RulePromptForm(initial={"natural_language": natural, "code_text": new_code})
             ctx.update({

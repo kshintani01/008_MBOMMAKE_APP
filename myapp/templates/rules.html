@@ -90,7 +90,7 @@
   {% if generated_code %}
     <h3>生成/編集するコード</h3>
     <p class="hint">apply_rules(df) を定義してください</p>
-    <textarea name="code_text" rows="18" style="width:100%;font-family:monospace;">{{ generated_code }}</textarea>
+    <textarea id="rule-textarea" name="code_text" rows="18" style="width:100%;font-family:monospace;">{{ generated_code }}</textarea>
     <input type="hidden" name="generated_code" value="{{ generated_code|escape }}">
     <input type="hidden" name="generated_addition" value="{{ generated_addition|default_if_none:''|escape }}">
   {% else %}
@@ -100,11 +100,15 @@
 
   {% if diff_text %}
   <h3>差分プレビュー</h3>
-  <pre class="diff">{{ diff_text }}</pre>
+  <pre id="diff-preview" class="diff">{{ diff_text }}</pre>
   <div class="actions">
     <button type="submit" name="action" value="apply_to_editor" class="btn-outline">差分を適用して最新のコードに反映</button>
   </div>
   {% endif %}
+
+  <div class="actions">
+    <button type="button" id="btn-reset-editor" class="btn btn-secondary">元に戻す</button>
+  </div>
 
   <label>CSVファイル</label>
   {{ form.csv_file }}
@@ -116,5 +120,79 @@
 
   {% if message %}<p class="msg">{{ message }}</p>{% endif %}
   {% if error %}<pre class="err">{{ error }}</pre>{% endif %}
+
+  <textarea id="original-code-snapshot" hidden>{% firstof active_code editor_code %}</textarea>
+  <script>
+    (function(){
+      function getEditorAPI(){
+        // ACE (id="editor" or data-editor)
+        if (window.ace) {
+          var el = document.getElementById('editor') || document.querySelector('[data-editor="ace"]');
+          if (el) {
+            try {
+              var inst = ace.edit(el);
+              return {
+                get: function(){ return inst.getValue(); },
+                set: function(v){ inst.setValue(v, -1); inst.clearSelection(); inst.focus(); }
+              };
+            } catch(e){}
+          }
+        }
+        // CodeMirror
+        if (window.CodeMirror) {
+          var cmEl = document.querySelector('.CodeMirror');
+          if (cmEl && cmEl.CodeMirror) {
+            var cm = cmEl.CodeMirror;
+            return {
+              get: function(){ return cm.getValue(); },
+              set: function(v){ cm.setValue(v); cm.execCommand('goDocStart'); cm.focus(); }
+            };
+          }
+        }
+        // Fallback: <textarea>
+        var ta = document.getElementById('rule-textarea') ||
+                 document.querySelector('textarea[name="code_text"], #id_code_text, textarea[name="code"], textarea[data-role="rule-editor"]');
+        if (ta) {
+          return {
+            get: function(){ return ta.value; },
+            set: function(v){ ta.value = v; ta.focus(); }
+          };
+        }
+        return null;
+      }
+  
+      function clearDiffPreview(){
+        var diff = document.getElementById('diff-preview') ||
+                   document.querySelector('.diff,[data-role="diff-preview"]');
+        if (diff) diff.innerHTML = '';
+      }
+  
+      document.addEventListener('DOMContentLoaded', function(){
+        var btn = document.getElementById('btn-reset-editor');
+        if (!btn) return;
+  
+        var api = getEditorAPI();
+        if (!api) return;
+  
+        var snapEl = document.getElementById('original-code-snapshot');
+        if (!snapEl) return;
+  
+        // ① スナップショットを取得（空なら現在のエディタ内容で初期化）
+        var original = (snapEl.textContent || '').trim();
+        if (!original) {
+          original = api.get() || '';
+          snapEl.textContent = original;  // 次回以降はこれを使う
+        }
+  
+        // ② クリックで復元
+        btn.addEventListener('click', function(){
+          api.set(original);
+          clearDiffPreview();
+          var msg = document.getElementById('flash');
+          if (msg) { msg.textContent = 'エディタを保存済みの内容に戻しました'; }
+        });
+      });
+    })();
+  </script>  
 </form>
 {% endblock %}

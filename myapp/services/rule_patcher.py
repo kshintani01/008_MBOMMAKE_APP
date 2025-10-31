@@ -66,13 +66,25 @@ def replace_rules_block(base_code: str, new_rules_body: str) -> str:
     new_block = begin_line + indented_body + end_line
     return before + new_block + after
 
-def unified_diff(old: str, new: str, fromfile="base.py", tofile="new.py") -> str:
-    return "".join(
-        difflib.unified_diff(
-            old.splitlines(True), new.splitlines(True),
-            fromfile=fromfile, tofile=tofile, lineterm=""
-        )
+def unified_diff(old: str, new: str,
+                 fromfile: str = "a",
+                 tofile: str = "b",
+                 context: int = 3) -> str:
+    """
+    ユニファイド差分を返す。context で前後コンテキスト行数を制御（0なら変更行のみ）。
+    ルール本文は正規化（改行/インデント/末尾改行調整）してから比較。
+    """
+    old_norm = _normalize_rules_body(old)
+    new_norm = _normalize_rules_body(new)
+    diff = difflib.unified_diff(
+        old_norm.splitlines(),          # keepends=False
+        new_norm.splitlines(),
+        fromfile=fromfile,
+        tofile=tofile,
+        lineterm="",
+        n=context
     )
+    return "\n".join(diff)
 
 def merge_rules_body_dedup(existing: str, addition: str) -> str:
     """
