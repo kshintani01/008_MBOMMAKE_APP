@@ -1,5 +1,4 @@
-import io
-import os
+import io, os, unicodedata, re
 import pandas as pd
 from django.http import HttpResponse, JsonResponse
 from django.contrib import messages
@@ -123,7 +122,15 @@ def rules(request):
 
             # ② CSV読込（BOM対策でutf-8-sig、必要ならエラー処理）
             df = _robust_read_csv(csv_file)
-            msgs = warn_unknown_columns(df)  # settings.REFERENCE_CSV_01_COLUMNS を参照
+
+            # ★ 列名の表記ゆれを正規化
+            df = _normalize_columns_for_rules(df)
+
+            # ★ ルールが参照する古い/揺れた表記名にも対応（影武者列を作成）
+            df = _ensure_rule_column_aliases(df, latest_full_code)
+
+            # 正規化後に unknown 列警告を評価
+            msgs = warn_unknown_columns(df)
             for m in msgs:
                 messages.warning(request, m)
 
@@ -168,7 +175,88 @@ def aoai_check(request):
         return JsonResponse({"success": ok, "echo": txt}, status=200 if ok else 502)
     except Exception as e:
         return JsonResponse({"success": False, "error":str(e)}, status=502)
-    
+
+def _normalize_columns_for_rules(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    列名をNFKC正規化（全角→半角、互換分解）＋トリムし、
+    代表名（canonical）に寄せる。代表名は実データ上の列名として残す。
+    例: ユニットＩＤ/ﾕﾆｯﾄID → ユニットID, 部品ｺｰﾄﾞ → 部品コード
+    """
+    CANON = {
+        "ユニットID": {
+            "ﾕﾆｯﾄID", "ﾕﾆｯﾄＩＤ", "ユニットＩＤ",
+            "ユニット Id", "ﾕﾆｯﾄ Id", "ユニットid", "ﾕﾆｯﾄid",
+            "ユニット ID", "ﾕﾆｯﾄ ID", "ユニット　ID", "ﾕﾆｯﾄ　ID",
+        },
+        "部品コード": {
+            "部品ｺｰﾄﾞ", "部品 ｺｰﾄﾞ", "部品 ｺ-ﾄﾞ",
+            "部品 コード", "部品  コード",
+            "部品CD", "品番", "部品番号",  # 必要に応じて調整
+        },
+    }
+
+    def canon(s: str) -> str:
+        if s is None:
+            return ""
+        # NFKCで幅・互換文字を揃え、前後空白除去
+        return unicodedata.normalize("NFKC", str(s)).strip()
+
+    df2 = df.copy()
+    # まず全列をNFKC化
+    df2.columns = [canon(c) for c in df2.columns]
+
+    # 同義語→代表名のリネームマップ
+    rename_map = {}
+    for rep, aliases in CANON.items():
+        rep_c = canon(rep)
+        rename_map[rep_c] = rep_c  # 自分自身（冪等性）
+        for a in aliases:
+            rename_map[canon(a)] = rep_c
+
+    # 実際に存在するものだけリネーム
+    df2.rename(columns={k: v for k, v in rename_map.items() if k in df2.columns}, inplace=True)
+    return df2
+
+def _ensure_rule_column_aliases(df: pd.DataFrame, rules_code: str) -> pd.DataFrame:
+    """
+    ルールコード中で参照されている列名（例: df['部品ｺｰﾄﾞ']）を抽出し、
+    そのNFKC正規化版（例: 部品コード）がDFに存在するなら、
+    参照名の“影武者列”を作ってエイリアス化する（df['部品ｺｰﾄﾞ'] = df['部品コード']）。
+    これでコード側が古い/揺れた表記でも壊れない。
+    """
+    def canon(s: str) -> str:
+        return unicodedata.normalize("NFKC", str(s)).strip()
+
+    # df['列名'] / df["列名"] / .loc[:, '列名'] / .loc[:, "列名"] を素直に拾う
+    pat = r"(?:df\s*\[\s*['\"]([^'\"]+)['\"]\s*\]|\.loc\s*\[\s*[:,\s]*['\"]([^'\"]+)['\"]\s*\])"
+    used = set()
+    for m in re.finditer(pat, rules_code or ""):
+        col = m.group(1) or m.group(2)
+        if col:
+            used.add(col)
+
+    if not used:
+        return df
+
+    df2 = df.copy()
+    canon_cols = {canon(c): c for c in df2.columns}  # NFKC→実列名
+
+    for raw in used:
+        raw_c = canon(raw)
+        # 既にその名前がDFにあれば何もしない
+        if raw in df2.columns:
+            continue
+        # 正規化名がDFにあれば “影武者列” を作る
+        if raw_c in canon_cols:
+            src = canon_cols[raw_c]
+            try:
+                df2[raw] = df2[src]
+            except Exception:
+                # 安全側でスキップ
+                pass
+
+    return df2
+
 def _robust_read_csv(uploaded_file) -> pd.DataFrame:
     """UTF-8(BOM付/無し)→CP932→UTF-8の順で解釈して読み込む"""
     import io as _io
